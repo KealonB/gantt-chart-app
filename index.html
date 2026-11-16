@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="A lightweight, in-browser Gantt chart creator. Prerelease." />
     <meta name="color-scheme" content="light dark" />
+    <meta name="gantt-app-version" content="2" />
     <title>Gantt — Prerelease</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Crect x='6' y='8' width='14' height='4' rx='1' fill='white'/%3E%3Crect x='10' y='14' width='16' height='4' rx='1' fill='white' opacity='.85'/%3E%3Crect x='8' y='20' width='10' height='4' rx='1' fill='white' opacity='.7'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -41,10 +42,11 @@
           </button>
           <button class="btn" id="btn-sample" title="Load a sample project">Load sample</button>
           <span class="sep"></span>
-          <button class="btn" id="btn-import" title="Import a JSON project">Import JSON</button>
+          <button class="btn" id="btn-import" title="Import JSON, Excel, or CSV">Import</button>
           <button class="btn" id="btn-export-json" title="Download the project as JSON">Export JSON</button>
+          <button class="btn" id="btn-export-xlsx" title="Download an Excel workbook with a Tasks sheet and a colored Timeline">Export Excel</button>
           <button class="btn" id="btn-export-png" title="Download a PNG of the chart">Export PNG</button>
-          <input id="import-file" type="file" accept="application/json,.json" hidden />
+          <input id="import-file" type="file" accept="application/json,.json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,.xls,text/csv,.csv" hidden />
           <span class="sep"></span>
           <div class="seg" role="group" aria-label="Timeline zoom">
             <button type="button" data-zoom="day" aria-pressed="false">Day</button>
@@ -66,6 +68,27 @@
         </div>
       </header>
 
+      <div class="app-subbar">
+        <div class="seg" role="group" aria-label="Scheduling calendar">
+          <button type="button" data-cal="calendar" aria-pressed="true">Calendar days</button>
+          <button type="button" data-cal="workdays" aria-pressed="false">Workdays</button>
+        </div>
+        <button class="btn" id="btn-holidays" title="Dates skipped in workdays mode">Holidays</button>
+        <span class="sep"></span>
+        <label class="chk">
+          <input type="checkbox" id="chk-critical" />
+          Critical path
+        </label>
+        <span class="sep"></span>
+        <button class="btn" id="btn-baseline" title="Save the current dates as the planned baseline">Set baseline</button>
+        <button class="btn" id="btn-clear-baseline" title="Remove the saved baseline">Clear baseline</button>
+        <span class="sep"></span>
+        <div class="seg" role="group" aria-label="Right pane view">
+          <button type="button" data-view="timeline" aria-pressed="true">Timeline</button>
+          <button type="button" data-view="resources" aria-pressed="false">Resources</button>
+        </div>
+      </div>
+
       <main class="workspace">
         <section class="task-pane" id="task-pane" aria-label="Task list">
           <div class="table-scroll" id="table-scroll">
@@ -76,11 +99,14 @@
                   <th class="col-id">ID</th>
                   <th class="col-name">Task</th>
                   <th class="col-start">Start</th>
-                  <th class="col-dur">Days</th>
+                  <th class="col-dur" id="dur-heading">Days</th>
                   <th class="col-end">End</th>
                   <th class="col-prog">%</th>
-                  <th class="col-deps">Depends</th>
+                  <th class="col-deps" title="Predecessors, e.g. 3, 4FS+2, 5SS-1">Depends</th>
                   <th class="col-who">Assignee</th>
+                  <th class="col-alloc" title="Percent of the assignee's time this task uses">Alloc%</th>
+                  <th class="col-ms" title="Zero-duration milestone">MS</th>
+                  <th class="col-var" title="Finish variance versus the baseline, in the current day unit">Var</th>
                   <th class="col-color">Color</th>
                   <th class="col-actions"></th>
                 </tr>
@@ -105,6 +131,7 @@
           </div>
           <div class="timeline-body-scroll" id="timeline-body-scroll">
             <div class="timeline-canvas" id="timeline-canvas"></div>
+            <div class="resource-canvas" id="resource-canvas" hidden></div>
           </div>
         </section>
       </main>
@@ -112,12 +139,30 @@
       <footer class="app-footer">
         <span id="status-saved">Saved in this browser</span>
         <span id="status-range"></span>
+        <span id="status-calendar"></span>
         <span id="status-cycle" class="cycle-warn" hidden></span>
       </footer>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+    <dialog class="modal" id="holiday-dialog">
+      <form method="dialog" class="modal-card">
+        <h2>Holidays</h2>
+        <p class="modal-lead">These dates are skipped when Workdays scheduling is on. Calendar-days mode still counts them.</p>
+        <ul class="holiday-list" id="holiday-list"></ul>
+        <div class="holiday-add">
+          <input type="date" id="holiday-date" aria-label="Holiday date" />
+          <button type="button" class="btn primary" id="holiday-add">Add</button>
+        </div>
+        <div class="modal-actions">
+          <button type="submit" class="btn" value="close">Done</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="vendor/xlsx.bundle.js"></script>
     <script src="schedule.js"></script>
+    <script src="excel.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

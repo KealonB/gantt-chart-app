@@ -3,9 +3,12 @@
   "use strict";
 
   var S = window.GanttSchedule;
+  var Excel = window.GanttExcel;
+  var XLSX = window.XLSX;
   var STORAGE_KEY = "gantt-chart-app:v1";
   var THEME_KEY = "gantt-chart-app:theme";
   var ROW_H = 40;
+  var RES_ROW_H = 44;
   var PALETTE = [
     "#0f766e",
     "#0369a1",
@@ -21,12 +24,18 @@
   var PX = { day: 36, week: 20, month: 8 };
 
   var state = {
+    version: 2,
     projectName: "Untitled project",
     tasks: [],
     nextNumber: 1,
     zoom: "week",
-    split: 560,
+    split: 620,
     selectedId: null,
+    calendarMode: "calendar",
+    holidays: [],
+    showCritical: false,
+    view: "timeline",
+    baselineSetAt: null,
   };
 
   var historyStack = [];
@@ -51,12 +60,25 @@
     return JSON.parse(JSON.stringify(obj));
   }
 
+  function calendar() {
+    return S.makeCalendar(state.calendarMode || "calendar", state.holidays || []);
+  }
+
+  function scheduleOptions() {
+    return { today: S.todayISO(), mode: state.calendarMode || "calendar", holidays: state.holidays || [] };
+  }
+
   function snapshot() {
     return {
       projectName: state.projectName,
       tasks: clone(state.tasks),
       nextNumber: state.nextNumber,
       zoom: state.zoom,
+      calendarMode: state.calendarMode,
+      holidays: clone(state.holidays || []),
+      showCritical: !!state.showCritical,
+      view: state.view,
+      baselineSetAt: state.baselineSetAt,
     };
   }
 
@@ -72,7 +94,12 @@
     state.tasks = clone(snap.tasks);
     state.nextNumber = snap.nextNumber;
     state.zoom = snap.zoom;
-    S.reschedule(state.tasks);
+    state.calendarMode = snap.calendarMode || "calendar";
+    state.holidays = clone(snap.holidays || []);
+    state.showCritical = !!snap.showCritical;
+    state.view = snap.view || "timeline";
+    state.baselineSetAt = snap.baselineSetAt || null;
+    S.reschedule(state.tasks, scheduleOptions());
     renderAll();
     persist();
   }
@@ -108,19 +135,26 @@
     }, 2400);
   }
 
+  function persistPayload() {
+    return {
+      version: 2,
+      projectName: state.projectName,
+      tasks: state.tasks,
+      nextNumber: state.nextNumber,
+      zoom: state.zoom,
+      split: state.split,
+      calendarMode: state.calendarMode,
+      holidays: state.holidays,
+      showCritical: state.showCritical,
+      view: state.view,
+      baselineSetAt: state.baselineSetAt,
+    };
+  }
+
   function persist() {
     if (suppressSave) return;
     try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          projectName: state.projectName,
-          tasks: state.tasks,
-          nextNumber: state.nextNumber,
-          zoom: state.zoom,
-          split: state.split,
-        })
-      );
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(persistPayload()));
       $("status-saved").textContent = "Saved in this browser";
     } catch (err) {
       $("status-saved").textContent = "Could not save (storage full?)";
@@ -148,6 +182,12 @@
     else throw new Error("JSON must be a project object with a tasks array, or a task array.");
 
     state.projectName = (data && data.projectName) || "Untitled project";
+    state.calendarMode = data && data.calendarMode === "workdays" ? "workdays" : "calendar";
+    state.holidays = S.uniqueSortedDates((data && data.holidays) || []);
+    state.showCritical = !!(data && data.showCritical);
+    if (data && (data.view === "timeline" || data.view === "resources")) state.view = data.view;
+    else state.view = "timeline";
+    state.baselineSetAt = (data && data.baselineSetAt) || null;
     var next = 1;
     state.tasks = tasks.map(function (raw, i) {
       var num = Number(raw.number) > 0 ? Math.round(Number(raw.number)) : i + 1;
@@ -158,7 +198,10 @@
     if (data && (data.zoom === "day" || data.zoom === "week" || data.zoom === "month")) {
       state.zoom = data.zoom;
     }
-    S.reschedule(state.tasks);
+    S.reschedule(state.tasks, scheduleOptions());
+    if (!state.baselineSetAt && state.tasks.some(function (t) { return t.baselineStart || t.baselineEnd; })) {
+      state.baselineSetAt = S.todayISO();
+    }
     if (opts.resetHistory) {
       historyStack = [];
       redoStack = [];
@@ -168,18 +211,24 @@
   }
 
   function normalizeIncoming(raw, num) {
+    var deps = S.parseDependencyInput(
+      Array.isArray(raw.dependencies) ? raw.dependencies : raw.dependencies || ""
+    );
+    var milestone = !!(raw.milestone || raw.duration === 0);
     return {
       id: raw.id || uid(),
       number: num,
       name: raw.name != null ? String(raw.name) : "",
       start: S.isISO(raw.start) ? raw.start : null,
       end: S.isISO(raw.end) ? raw.end : null,
-      duration: raw.duration == null || raw.duration === "" ? null : Number(raw.duration),
+      duration: milestone ? 0 : raw.duration == null || raw.duration === "" ? null : Number(raw.duration),
       progress: S.clampProgress(raw.progress),
-      dependencies: S.parseDependencyInput(
-        Array.isArray(raw.dependencies) ? raw.dependencies.join(",") : raw.dependencies || ""
-      ),
+      dependencies: deps,
       assignee: raw.assignee != null ? String(raw.assignee) : "",
+      allocation: S.clampAllocation(raw.allocation),
+      milestone: milestone,
+      baselineStart: S.isISO(raw.baselineStart) ? raw.baselineStart : null,
+      baselineEnd: S.isISO(raw.baselineEnd) ? raw.baselineEnd : null,
       color: /^#?[0-9a-fA-F]{6}$/.test(raw.color || "")
         ? raw.color[0] === "#"
           ? raw.color
@@ -196,21 +245,25 @@
 
   function createTask(partial) {
     partial = partial || {};
-    var task = {
+    var milestone = !!(partial.milestone || partial.duration === 0);
+    return {
       id: uid(),
       number: state.nextNumber++,
       name: partial.name || "",
       start: partial.start || S.todayISO(),
-      duration: partial.duration != null ? partial.duration : 1,
+      duration: milestone ? 0 : partial.duration != null ? partial.duration : 1,
       end: partial.end || null,
       progress: partial.progress || 0,
-      dependencies: partial.dependencies || [],
+      dependencies: S.parseDependencyInput(partial.dependencies || []),
       assignee: partial.assignee || "",
+      allocation: S.clampAllocation(partial.allocation == null ? 100 : partial.allocation),
+      milestone: milestone,
+      baselineStart: partial.baselineStart || null,
+      baselineEnd: partial.baselineEnd || null,
       color: partial.color || nextColor(),
       indent: partial.indent || 0,
       collapsed: false,
     };
-    return task;
   }
 
   function getTask(id) {
@@ -253,23 +306,28 @@
     return {
       projectName: "Harbor site launch",
       zoom: "week",
+      calendarMode: "workdays",
+      holidays: ["2026-11-26", "2026-12-25"],
+      showCritical: true,
+      view: "timeline",
+      baselineSetAt: "2026-11-02",
       tasks: [
         { number: 1, name: "Discovery", indent: 0, color: "#0f766e", assignee: "" },
-        { number: 2, name: "Kickoff meeting", start: "2026-11-02", duration: 1, progress: 100, indent: 1, color: "#0f766e", assignee: "Alex" },
-        { number: 3, name: "Stakeholder interviews", start: "2026-11-03", duration: 4, progress: 100, indent: 1, color: "#0f766e", assignee: "Alex", dependencies: [2] },
-        { number: 4, name: "Requirements document", start: "2026-11-09", duration: 5, progress: 100, indent: 1, color: "#0f766e", assignee: "Jordan", dependencies: [3] },
-        { number: 5, name: "Design", indent: 0, color: "#7c3aed", dependencies: [4] },
-        { number: 6, name: "Wireframes", duration: 4, progress: 40, indent: 1, color: "#7c3aed", assignee: "Sam", dependencies: [4] },
-        { number: 7, name: "Visual design", duration: 6, progress: 0, indent: 1, color: "#7c3aed", assignee: "Sam", dependencies: [6] },
-        { number: 8, name: "Design review", duration: 2, progress: 0, indent: 1, color: "#7c3aed", assignee: "Alex", dependencies: [7] },
-        { number: 9, name: "Build", indent: 0, color: "#0369a1", dependencies: [8] },
-        { number: 10, name: "Frontend implementation", duration: 9, indent: 1, color: "#0369a1", assignee: "Riley", dependencies: [8] },
-        { number: 11, name: "Backend APIs", duration: 8, indent: 1, color: "#0369a1", assignee: "Quinn", dependencies: [8] },
-        { number: 12, name: "Integrations", duration: 4, indent: 1, color: "#0369a1", assignee: "Quinn", dependencies: [11] },
-        { number: 13, name: "Launch", indent: 0, color: "#c2410c", dependencies: [9] },
-        { number: 14, name: "QA & bug bash", duration: 3, indent: 1, color: "#c2410c", assignee: "Jordan", dependencies: [9] },
-        { number: 15, name: "Staging deploy", duration: 1, indent: 1, color: "#c2410c", assignee: "Riley", dependencies: [14] },
-        { number: 16, name: "Go live", duration: 1, indent: 1, color: "#be185d", assignee: "Alex", dependencies: [15] },
+        { number: 2, name: "Kickoff", start: "2026-11-02", duration: 0, milestone: true, progress: 100, indent: 1, color: "#0f766e", assignee: "Alex", allocation: 100, baselineStart: "2026-11-02", baselineEnd: "2026-11-02" },
+        { number: 3, name: "Stakeholder interviews", duration: 4, progress: 100, indent: 1, color: "#0f766e", assignee: "Alex", allocation: 100, dependencies: "2FS", baselineStart: "2026-11-03", baselineEnd: "2026-11-06" },
+        { number: 4, name: "Requirements document", duration: 5, progress: 100, indent: 1, color: "#0f766e", assignee: "Jordan", allocation: 100, dependencies: "3FS", baselineStart: "2026-11-09", baselineEnd: "2026-11-13" },
+        { number: 5, name: "Design", indent: 0, color: "#7c3aed", dependencies: "4FS" },
+        { number: 6, name: "Wireframes", duration: 4, progress: 40, indent: 1, color: "#7c3aed", assignee: "Sam", allocation: 100, dependencies: "4FS", baselineStart: "2026-11-16", baselineEnd: "2026-11-19" },
+        { number: 7, name: "Visual design", duration: 6, progress: 0, indent: 1, color: "#7c3aed", assignee: "Sam", allocation: 100, dependencies: "6SS+2", baselineStart: "2026-11-18", baselineEnd: "2026-11-25" },
+        { number: 8, name: "Design review", duration: 2, progress: 0, indent: 1, color: "#7c3aed", assignee: "Alex", allocation: 100, dependencies: "7FS+1", baselineStart: "2026-11-27", baselineEnd: "2026-11-30" },
+        { number: 9, name: "Build", indent: 0, color: "#0369a1", dependencies: "8FS" },
+        { number: 10, name: "Frontend implementation", duration: 9, indent: 1, color: "#0369a1", assignee: "Riley", allocation: 100, dependencies: "8FS", baselineStart: "2026-12-01", baselineEnd: "2026-12-11" },
+        { number: 11, name: "Backend APIs", duration: 8, indent: 1, color: "#0369a1", assignee: "Quinn", allocation: 100, dependencies: "8FS", baselineStart: "2026-12-01", baselineEnd: "2026-12-10" },
+        { number: 12, name: "Integrations", duration: 4, indent: 1, color: "#0369a1", assignee: "Quinn", allocation: 100, dependencies: "11SS+3", baselineStart: "2026-12-04", baselineEnd: "2026-12-09" },
+        { number: 13, name: "Launch", indent: 0, color: "#c2410c", dependencies: "9FS" },
+        { number: 14, name: "QA & bug bash", duration: 3, indent: 1, color: "#c2410c", assignee: "Jordan", allocation: 50, dependencies: "9FS, 12FF", baselineStart: "2026-12-11", baselineEnd: "2026-12-15" },
+        { number: 15, name: "Staging deploy", duration: 1, indent: 1, color: "#c2410c", assignee: "Riley", allocation: 100, dependencies: "14FS", baselineStart: "2026-12-16", baselineEnd: "2026-12-16" },
+        { number: 16, name: "Go live", duration: 0, milestone: true, indent: 1, color: "#be185d", assignee: "Alex", allocation: 100, dependencies: "15FS", baselineStart: "2026-12-17", baselineEnd: "2026-12-17" },
       ],
     };
   }
@@ -277,7 +335,7 @@
   /* ---- schedule + field edits ------------------------------------------ */
 
   function runSchedule() {
-    var result = S.reschedule(state.tasks);
+    var result = S.reschedule(state.tasks, scheduleOptions());
     var cyclic = Object.keys(result.cyclic || {});
     var warn = $("status-cycle");
     if (cyclic.length) {
@@ -297,7 +355,19 @@
     if (field === "name") task.name = value;
     else if (field === "assignee") task.assignee = value;
     else if (field === "color") task.color = value;
-    else if (field === "progress") {
+    else if (field === "allocation") {
+      if (value === "" || value === "-") return false;
+      task.allocation = S.clampAllocation(value);
+    } else if (field === "milestone") {
+      var on = value === true || value === "true" || value === "on" || value === "1";
+      task.milestone = on;
+      if (on) {
+        task.duration = 0;
+        if (S.isISO(task.start)) task.end = task.start;
+      } else if (!task.duration) {
+        task.duration = 1;
+      }
+    } else if (field === "progress") {
       if (value === "" || value === "-") return false;
       task.progress = S.clampProgress(value);
     } else if (field === "dependencies") {
@@ -314,18 +384,28 @@
       if (value === "" || value === "-") return false;
       var n = Number(value);
       if (!Number.isFinite(n)) return false;
-      task.duration = Math.max(1, Math.round(n));
+      n = Math.round(n);
+      if (n <= 0) {
+        task.duration = 0;
+        task.milestone = true;
+      } else {
+        task.duration = n;
+        task.milestone = false;
+      }
     } else if (field === "end") {
       if (value === "") {
         return false;
       } else if (S.isISO(value)) {
-        if (S.isISO(task.start) && value < task.start) {
-          task.duration = S.inclusiveDuration(task.start, value) ? 1 : 1;
+        if (task.milestone) {
+          task.start = value;
+          task.end = value;
+        } else if (S.isISO(task.start) && value < task.start) {
           task.end = task.start;
           task.duration = 1;
         } else if (S.isISO(task.start)) {
           task.end = value;
-          task.duration = S.inclusiveDuration(task.start, task.end);
+          var dur = S.inclusiveDuration(task.start, task.end, calendar());
+          task.duration = dur < 1 ? 1 : dur;
         } else {
           task.end = value;
         }
@@ -339,7 +419,7 @@
   function onFieldInput(id, field, value) {
     var task = getTask(id);
     if (!task) return;
-    if (task.isGroup && (field === "start" || field === "end" || field === "duration" || field === "progress")) {
+    if (task.isGroup && (field === "start" || field === "end" || field === "duration" || field === "progress" || field === "milestone")) {
       return;
     }
     if (!applyField(task, field, value)) return;
@@ -372,16 +452,11 @@
     if (idx < 0) return;
     pushHistory();
     var num = state.tasks[idx].number;
-    var desc = S.getDescendantIndexes(state.tasks, idx);
     state.tasks.splice(idx, 1);
-    desc.forEach(function () {
-      /* descendants stay; their indent is reduced if they would float */
-    });
-    /* After removing the parent only, former children keep indent. Reduce orphans that would have a gap. */
     normalizeIndents();
     state.tasks.forEach(function (t) {
-      t.dependencies = (t.dependencies || []).filter(function (d) {
-        return d !== num;
+      t.dependencies = S.normalizeDeps(t.dependencies).filter(function (d) {
+        return d.pred !== num;
       });
     });
     runSchedule();
@@ -493,6 +568,11 @@
     state.tasks = [];
     state.nextNumber = 1;
     state.selectedId = null;
+    state.calendarMode = "calendar";
+    state.holidays = [];
+    state.showCritical = false;
+    state.view = "timeline";
+    state.baselineSetAt = null;
     renderAll();
     persist();
   }
@@ -504,6 +584,27 @@
     toast("Loaded sample project");
   }
 
+  function setBaseline() {
+    pushHistory();
+    S.setBaseline(state.tasks);
+    state.baselineSetAt = S.todayISO();
+    runSchedule();
+    renderAll();
+    persist();
+    toast("Baseline saved");
+  }
+
+  function clearBaseline() {
+    if (!state.baselineSetAt && !state.tasks.some(function (t) { return t.baselineStart || t.baselineEnd; })) return;
+    pushHistory();
+    S.clearBaseline(state.tasks);
+    state.baselineSetAt = null;
+    runSchedule();
+    renderAll();
+    persist();
+    toast("Baseline cleared");
+  }
+
   /* ---- render table ----------------------------------------------------- */
 
   function icon(path) {
@@ -512,6 +613,14 @@
       path +
       "</svg>"
     );
+  }
+
+  function varianceHtml(task) {
+    if (task.variance == null) return '<span class="var-val">—</span>';
+    var v = task.variance;
+    var cls = v > 0 ? " is-slip" : v < 0 ? " is-ahead" : "";
+    var text = (v > 0 ? "+" : "") + v;
+    return '<span class="var-val' + cls + '">' + text + "</span>";
   }
 
   function renderTable() {
@@ -540,6 +649,7 @@
         '" class="' +
         (hidden ? "is-hidden " : "") +
         (group ? "is-group " : "") +
+        (task.critical && state.showCritical ? "is-critical " : "") +
         (state.selectedId === task.id ? "is-selected " : "") +
         (hoverId === task.id ? "is-hover " : "") +
         '">' +
@@ -563,7 +673,7 @@
         ro +
         title +
         " /></td>" +
-        '<td class="col-dur"><input class="cell-input" type="number" min="1" step="1" data-field="duration" value="' +
+        '<td class="col-dur"><input class="cell-input" type="number" min="0" step="1" data-field="duration" value="' +
         escapeAttr(task.duration == null ? "" : String(task.duration)) +
         '"' +
         ro +
@@ -583,10 +693,20 @@
         " /></td>" +
         '<td class="col-deps"><input class="cell-input" data-field="dependencies" value="' +
         escapeAttr(S.formatDependencies(task.dependencies)) +
-        '" placeholder="e.g. 2, 4" title="Predecessor task IDs, comma-separated" /></td>' +
+        '" placeholder="3FS+2, 5SS" title="Predecessors: 3, 4FS+2, 5SS-1, 6FF, 7SF" /></td>' +
         '<td class="col-who"><input class="cell-input" data-field="assignee" value="' +
         escapeAttr(task.assignee) +
         '" placeholder="Name" /></td>' +
+        '<td class="col-alloc"><input class="cell-input" type="number" min="0" max="400" step="5" data-field="allocation" value="' +
+        escapeAttr(String(task.allocation == null ? 100 : task.allocation)) +
+        '" title="Percent of the assignee\'s time" /></td>' +
+        '<td class="col-ms"><div class="ms-cell"><input class="cell-check" type="checkbox" data-field="milestone"' +
+        (task.milestone ? " checked" : "") +
+        (group ? " disabled" : "") +
+        ' title="Milestone (zero duration)" /></div></td>' +
+        '<td class="col-var"><div class="var-cell">' +
+        varianceHtml(task) +
+        "</div></td>" +
         '<td class="col-color"><input class="color-input" type="color" data-field="color" value="' +
         escapeAttr(task.color || PALETTE[0]) +
         '" title="Bar color" /></td>' +
@@ -612,6 +732,7 @@
     $("task-count").textContent = state.tasks.length
       ? state.tasks.length + (state.tasks.length === 1 ? " task" : " tasks")
       : "";
+    $("dur-heading").textContent = state.calendarMode === "workdays" ? "Workdays" : "Days";
   }
 
   function escapeAttr(s) {
@@ -635,19 +756,27 @@
       tr.classList.toggle("is-hidden", !isRowVisible(indexById(task.id)));
       tr.classList.toggle("is-selected", state.selectedId === task.id);
       tr.classList.toggle("is-hover", hoverId === task.id);
-      ["start", "duration", "end", "progress"].forEach(function (field) {
+      tr.classList.toggle("is-critical", !!(task.critical && state.showCritical));
+      ["start", "duration", "end", "progress", "allocation"].forEach(function (field) {
         var input = tr.querySelector('[data-field="' + field + '"]');
         if (!input || input === active) return;
         var val = task[field] == null ? "" : String(task[field]);
+        if (field === "allocation" && val === "") val = "100";
         if (input.value !== val) input.value = val;
-        var ro = !!task.isGroup;
-        input.readOnly = ro;
+        if (field !== "allocation") input.readOnly = !!task.isGroup;
       });
       var deps = tr.querySelector('[data-field="dependencies"]');
       if (deps && deps !== active) {
         var formatted = S.formatDependencies(task.dependencies);
         if (deps.value !== formatted) deps.value = formatted;
       }
+      var ms = tr.querySelector('[data-field="milestone"]');
+      if (ms && ms !== active) {
+        ms.checked = !!task.milestone;
+        ms.disabled = !!task.isGroup;
+      }
+      var varCell = tr.querySelector(".var-cell");
+      if (varCell) varCell.innerHTML = varianceHtml(task);
     });
     if (needFull) renderTable();
   }
@@ -679,8 +808,10 @@
     var start = S.todayISO();
     var end = start;
     state.tasks.forEach(function (t) {
-      if (S.isISO(t.start) && t.start < start) start = t.start;
-      if (S.isISO(t.end) && t.end > end) end = t.end;
+      ["start", "end", "baselineStart", "baselineEnd"].forEach(function (k) {
+        if (S.isISO(t[k]) && t[k] < start) start = t[k];
+        if (S.isISO(t[k]) && t[k] > end) end = t[k];
+      });
     });
     start = S.addDays(start, -7);
     end = S.addDays(end, state.zoom === "month" ? 21 : 14);
@@ -698,20 +829,14 @@
     return S.diffDays(range.start, iso) * pxPerDay();
   }
 
-  function renderTimeline() {
-    var range = computeRange();
-    lastRange = range;
-    var px = pxPerDay();
-    var width = range.days * px;
-    var entries = visibleEntries();
-    var height = Math.max(entries.length * ROW_H, $("timeline-body-scroll").clientHeight || 200);
-
+  function renderTimelineHeader(range, width) {
     var header = $("timeline-header");
     header.style.width = width + "px";
     var hhtml = "";
+    var px = pxPerDay();
     var monthStart = range.start;
     var curMonth = monthStart.slice(0, 7);
-    S.eachDay(range.start, range.end, function (iso, d) {
+    S.eachDay(range.start, range.end, function (iso) {
       var key = iso.slice(0, 7);
       if (key !== curMonth) {
         hhtml += bandHtml(range, monthStart, S.addDays(iso, -1), monthLabel(monthStart));
@@ -725,17 +850,16 @@
       var left = dayLeft(range, iso);
       var weekend = d.getDay() === 0 || d.getDay() === 6;
       var today = iso === S.todayISO();
-      var showDay = state.zoom === "day" || state.zoom === "week" || d.getDate() === 1 || d.getDate() % (state.zoom === "month" ? 5 : 1) === 0;
-      if (state.zoom === "month" && !showDay && !today && !weekend) {
-        /* still draw a quiet tick */
-      }
       var dow = ["S", "M", "T", "W", "T", "F", "S"][d.getDay()];
       var label =
         state.zoom === "month"
           ? today || d.getDate() === 1 || d.getDate() % 5 === 0
             ? '<span class="dom">' + d.getDate() + "</span>"
             : ""
-          : '<span class="dom">' + d.getDate() + "</span>" + (state.zoom === "day" ? '<span class="dow">' + dow + "</span>" : "");
+          : '<span class="dom">' +
+            d.getDate() +
+            "</span>" +
+            (state.zoom === "day" ? '<span class="dow">' + dow + "</span>" : "");
       hhtml +=
         '<div class="tl-day' +
         (weekend ? " is-weekend" : "") +
@@ -760,11 +884,11 @@
         'px">Today</div>';
     }
     header.innerHTML = hhtml;
+  }
 
-    var canvas = $("timeline-canvas");
-    var chtml = "";
-    /* weekend + grid */
-    chtml += '<div class="tl-grid" style="position:absolute;inset:0;height:' + height + "px;width:" + width + 'px">';
+  function gridHtml(range, width, height) {
+    var px = pxPerDay();
+    var chtml = '<div class="tl-grid" style="position:absolute;inset:0;height:' + height + "px;width:" + width + 'px">';
     S.eachDay(range.start, range.end, function (iso, d) {
       var left = dayLeft(range, iso);
       if (d.getDay() === 0 || d.getDay() === 6) {
@@ -774,10 +898,35 @@
         chtml += '<div class="tl-gridline" style="left:' + left + 'px"></div>';
       }
     });
+    var today = S.todayISO();
     if (today >= range.start && today <= range.end) {
       chtml += '<div class="today-line" style="left:' + (dayLeft(range, today) + px / 2) + 'px"></div>';
     }
     chtml += "</div>";
+    return chtml;
+  }
+
+  function renderTimeline() {
+    var range = computeRange();
+    lastRange = range;
+    var px = pxPerDay();
+    var width = range.days * px;
+    renderTimelineHeader(range, width);
+
+    $("resource-canvas").hidden = state.view !== "resources";
+    document.querySelector(".workspace").classList.toggle("is-resources", state.view === "resources");
+    document.querySelector(".workspace").classList.toggle("show-critical", !!state.showCritical);
+
+    if (state.view === "resources") {
+      renderResources(range, width);
+      $("timeline-header-clip").scrollLeft = $("timeline-body-scroll").scrollLeft;
+      return;
+    }
+
+    var entries = visibleEntries();
+    var height = Math.max(entries.length * ROW_H, $("timeline-body-scroll").clientHeight || 200);
+    var canvas = $("timeline-canvas");
+    var chtml = gridHtml(range, width, height);
 
     if (!state.tasks.length) {
       chtml +=
@@ -791,41 +940,70 @@
         (state.selectedId === task.id ? " is-selected" : "") +
         (hoverId === task.id ? " is-hover" : "");
       chtml += '<div class="' + cls + '" data-id="' + escapeAttr(task.id) + '">';
-      if (S.isISO(task.start) && S.isISO(task.end) && task.end >= task.start) {
-        var left = dayLeft(range, task.start) + 1;
-        var w = Math.max(px - 2, task.duration * px - 2);
-        var lum = hexLuminance(task.color || PALETTE[0]);
-        var labelColor = lum > 0.62 ? "#1c212b" : "#fff";
+      if (S.isISO(task.baselineStart) && S.isISO(task.baselineEnd)) {
+        var bl = dayLeft(range, task.baselineStart) + 1;
+        var bw = Math.max(px - 2, Math.max(1, S.diffDays(task.baselineStart, task.baselineEnd) + 1) * px - 2);
         chtml +=
-          '<div class="bar' +
-          (task.isGroup ? " is-group" : "") +
-          (drag && drag.id === task.id ? " is-dragging" : "") +
-          '" data-id="' +
-          escapeAttr(task.id) +
-          '" style="left:' +
-          left +
+          '<div class="bar-baseline" style="left:' +
+          bl +
           "px;width:" +
-          w +
-          "px;background:" +
-          escapeAttr(task.color || PALETTE[0]) +
-          '">' +
-          '<div class="bar-fill" style="width:' +
-          S.clampProgress(task.progress) +
-          '%"></div>' +
-          (task.isGroup
-            ? ""
-            : '<div class="bar-label" style="color:' +
-              labelColor +
-              '">' +
-              escapeAttr(task.name || "Task #" + task.number) +
-              "</div>") +
-          (task.isGroup ? "" : '<div class="bar-handle start" data-handle="start"></div><div class="bar-handle end" data-handle="end"></div>') +
-          "</div>";
+          (task.milestone ? 8 : bw) +
+          'px"></div>';
+      }
+      if (S.isISO(task.start) && S.isISO(task.end) && task.end >= task.start) {
+        if (task.milestone) {
+          var mx = dayLeft(range, task.start) + px / 2;
+          chtml +=
+            '<div class="milestone-diamond' +
+            (task.critical ? " is-critical" : "") +
+            (drag && drag.id === task.id ? " is-dragging" : "") +
+            '" data-id="' +
+            escapeAttr(task.id) +
+            '" title="' +
+            escapeAttr((task.name || "Milestone #" + task.number) + " · " + task.start) +
+            '" style="left:' +
+            mx +
+            "px;background:" +
+            escapeAttr(task.color || PALETTE[0]) +
+            '"></div>';
+        } else {
+          var left = dayLeft(range, task.start) + 1;
+          var w = Math.max(px - 2, (S.diffDays(task.start, task.end) + 1) * px - 2);
+          var lum = hexLuminance(task.color || PALETTE[0]);
+          var labelColor = lum > 0.62 ? "#1c212b" : "#fff";
+          chtml +=
+            '<div class="bar' +
+            (task.isGroup ? " is-group" : "") +
+            (task.critical ? " is-critical" : "") +
+            (drag && drag.id === task.id ? " is-dragging" : "") +
+            '" data-id="' +
+            escapeAttr(task.id) +
+            '" style="left:' +
+            left +
+            "px;width:" +
+            w +
+            "px;background:" +
+            escapeAttr(task.color || PALETTE[0]) +
+            '">' +
+            '<div class="bar-fill" style="width:' +
+            S.clampProgress(task.progress) +
+            '%"></div>' +
+            (task.isGroup
+              ? ""
+              : '<div class="bar-label" style="color:' +
+                labelColor +
+                '">' +
+                escapeAttr(task.name || "Task #" + task.number) +
+                "</div>") +
+            (task.isGroup
+              ? ""
+              : '<div class="bar-handle start" data-handle="start"></div><div class="bar-handle end" data-handle="end"></div>') +
+            "</div>";
+        }
       }
       chtml += "</div>";
     });
 
-    /* arrows */
     chtml +=
       '<svg class="arrow-layer" width="' +
       width +
@@ -840,17 +1018,27 @@
     entries.forEach(function (e, i) {
       visIndex[e.task.number] = i;
     });
+    var cal = calendar();
     entries.forEach(function (entry) {
       var task = entry.task;
-      (task.dependencies || []).forEach(function (depNum) {
-        var pred = S.findTaskByNumber(state.tasks, depNum);
-        if (!pred || !S.isISO(pred.end) || !S.isISO(task.start)) return;
+      S.normalizeDeps(task.dependencies).forEach(function (dep) {
+        var pred = S.findTaskByNumber(state.tasks, dep.pred);
+        if (!pred || !S.isISO(pred.start) || !S.isISO(pred.end) || !S.isISO(task.start) || !S.isISO(task.end)) return;
         if (visIndex[pred.number] == null || visIndex[task.number] == null) return;
         var y1 = visIndex[pred.number] * ROW_H + ROW_H / 2;
         var y2 = visIndex[task.number] * ROW_H + ROW_H / 2;
-        var x1 = dayLeft(range, pred.end) + px - 1;
-        var x2 = dayLeft(range, task.start) + 1;
-        chtml += arrowPath(x1, y1, x2, y2);
+        var type = dep.type || "FS";
+        var predX = type === "SS" || type === "SF" ? pred.start : pred.end;
+        var succX = type === "FF" || type === "SF" ? task.end : task.start;
+        var x1, x2;
+        if (type === "SS" || type === "SF") x1 = dayLeft(range, pred.start) + (pred.milestone ? px / 2 : 1);
+        else x1 = dayLeft(range, pred.end) + (pred.milestone ? px / 2 : px - 1);
+        if (type === "FF" || type === "SF") x2 = dayLeft(range, task.end) + (task.milestone ? px / 2 : px - 1);
+        else x2 = dayLeft(range, task.start) + (task.milestone ? px / 2 : 1);
+        void predX;
+        void succX;
+        var crit = S.isCriticalDep(pred, task, dep, cal);
+        chtml += arrowPath(x1, y1, x2, y2, crit);
       });
     });
     chtml += "</svg>";
@@ -858,8 +1046,66 @@
     canvas.style.width = width + "px";
     canvas.style.height = height + "px";
     canvas.innerHTML = chtml;
-
     $("timeline-header-clip").scrollLeft = $("timeline-body-scroll").scrollLeft;
+  }
+
+  function loadColor(pct) {
+    // 0 = empty, 1-50 muted teal, 51-100 solid teal, >100 rose
+    if (pct <= 0) return "transparent";
+    if (pct > 100) {
+      var over = Math.min(1, (pct - 100) / 100);
+      return "rgba(225, 29, 72," + (0.45 + over * 0.4).toFixed(2) + ")";
+    }
+    var a = 0.18 + (pct / 100) * 0.55;
+    return "rgba(15, 118, 110," + a.toFixed(2) + ")";
+  }
+
+  function renderResources(range, width) {
+    var canvas = $("resource-canvas");
+    var cal = calendar();
+    var rows = S.resourceUsage(state.tasks, range.start, range.end, cal);
+    var height = Math.max(rows.length * RES_ROW_H, $("timeline-body-scroll").clientHeight || 200);
+    var px = pxPerDay();
+    var html = gridHtml(range, width, height);
+    if (!rows.length) {
+      html +=
+        '<div class="res-empty">Assign people to tasks to see their workload. Days over 100% are flagged as overallocated.</div>';
+    }
+    rows.forEach(function (row, i) {
+      html +=
+        '<div class="res-row" data-assignee="' +
+        escapeAttr(row.name) +
+        '"><div class="res-label' +
+        (row.overallocated ? " is-over" : "") +
+        '"><strong>' +
+        escapeAttr(row.name) +
+        "</strong><span>" +
+        (row.overallocated
+          ? row.overDays.length + " day" + (row.overDays.length === 1 ? "" : "s") + " over 100%"
+          : "Peak " + row.peak + "%") +
+        "</span></div>";
+      Object.keys(row.days).forEach(function (iso) {
+        if (iso < range.start || iso > range.end) return;
+        var left = dayLeft(range, iso);
+        var pct = row.days[iso];
+        html +=
+          '<div class="res-cell' +
+          (pct > 100 ? " is-over" : "") +
+          '" title="' +
+          escapeAttr(row.name + " · " + iso + " · " + pct + "%") +
+          '" style="left:' +
+          left +
+          "px;width:" +
+          Math.max(2, px - 1) +
+          "px;background:" +
+          loadColor(pct) +
+          '"></div>';
+      });
+      html += "</div>";
+    });
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+    canvas.innerHTML = html;
   }
 
   function bandHtml(range, start, end, label) {
@@ -881,18 +1127,22 @@
     return d.toLocaleString(undefined, { month: "short", year: "numeric" });
   }
 
-  function arrowPath(x1, y1, x2, y2) {
+  function arrowPath(x1, y1, x2, y2, critical) {
     var dx = Math.max(16, Math.abs(x2 - x1) / 2);
     var c1x = x1 + dx;
     var c2x = x2 - dx;
     var tip = 5;
+    var cls = critical && state.showCritical ? ' class="is-critical"' : "";
     var path = "M" + x1 + " " + y1 + " C " + c1x + " " + y1 + ", " + c2x + " " + y2 + ", " + x2 + " " + y2;
-    /* arrowhead */
     return (
-      '<path d="' +
+      "<path" +
+      cls +
+      ' d="' +
       path +
       '" />' +
-      '<polygon points="' +
+      "<polygon" +
+      cls +
+      ' points="' +
       x2 +
       "," +
       y2 +
@@ -924,13 +1174,21 @@
     var starts = state.tasks.map(function (t) { return t.start; }).filter(S.isISO);
     var ends = state.tasks.map(function (t) { return t.end; }).filter(S.isISO);
     var el = $("status-range");
-    if (!starts.length) {
-      el.textContent = "";
-      return;
+    if (!starts.length) el.textContent = "";
+    else {
+      var a = S.minISO.apply(null, starts);
+      var b = S.maxISO.apply(null, ends);
+      el.textContent = formatLong(a) + " – " + formatLong(b);
     }
-    var a = S.minISO.apply(null, starts);
-    var b = S.maxISO.apply(null, ends);
-    el.textContent = formatLong(a) + " – " + formatLong(b);
+    var cal = $("status-calendar");
+    var bits = [state.calendarMode === "workdays" ? "Workdays (skip weekends & holidays)" : "Calendar days"];
+    if (state.calendarMode === "workdays" && state.holidays.length) {
+      bits.push(state.holidays.length + " holiday" + (state.holidays.length === 1 ? "" : "s"));
+    }
+    if (state.baselineSetAt) bits.push("Baseline set");
+    var critN = state.tasks.filter(function (t) { return t.critical && !t.isGroup; }).length;
+    if (state.showCritical) bits.push(critN + " critical");
+    cal.textContent = bits.join(" · ");
   }
 
   function formatLong(iso) {
@@ -942,6 +1200,13 @@
     document.querySelectorAll(".seg [data-zoom]").forEach(function (btn) {
       btn.setAttribute("aria-pressed", btn.getAttribute("data-zoom") === state.zoom ? "true" : "false");
     });
+    document.querySelectorAll(".seg [data-cal]").forEach(function (btn) {
+      btn.setAttribute("aria-pressed", btn.getAttribute("data-cal") === state.calendarMode ? "true" : "false");
+    });
+    document.querySelectorAll(".seg [data-view]").forEach(function (btn) {
+      btn.setAttribute("aria-pressed", btn.getAttribute("data-view") === state.view ? "true" : "false");
+    });
+    $("chk-critical").checked = !!state.showCritical;
   }
 
   function renderAll() {
@@ -952,6 +1217,7 @@
     renderTimeline();
     updateStatus();
     updateUndoButtons();
+    renderHolidayList();
   }
 
   /* ---- interactions ----------------------------------------------------- */
@@ -962,7 +1228,8 @@
     var tr = input.closest("tr");
     if (!tr) return;
     maybeCheckpoint();
-    onFieldInput(tr.getAttribute("data-id"), input.getAttribute("data-field"), input.value);
+    var val = input.type === "checkbox" ? input.checked : input.value;
+    onFieldInput(tr.getAttribute("data-id"), input.getAttribute("data-field"), val);
   }
 
   function maybeCheckpoint() {
@@ -1016,7 +1283,6 @@
     });
   }
 
-  /* row drag */
   function onGrabDragStart(e) {
     var handle = e.target.closest("[data-act=grab]");
     if (!handle) return;
@@ -1064,7 +1330,7 @@
     var block = rowDrag.block;
     if (insertAt > rowDrag.index && insertAt <= block[block.length - 1] + 1) return;
     var rect = tr.getBoundingClientRect();
-    var after = e.clientY > rect.top + rect.height / 2;
+    var after = ev.clientY > rect.top + rect.height / 2;
     if (after) {
       var lastId = state.tasks[S.getBlockIndexes(state.tasks, indexById(tr.dataset.id)).pop()].id;
       var lastTr = $("task-body").querySelector('tr[data-id="' + cssEscape(lastId) + '"]');
@@ -1093,10 +1359,9 @@
     }
   }
 
-  /* bar drag */
   function onCanvasPointerDown(e) {
     var handle = e.target.closest(".bar-handle");
-    var bar = e.target.closest(".bar");
+    var bar = e.target.closest(".bar, .milestone-diamond");
     if (!bar) {
       var row = e.target.closest(".tl-row");
       if (row) {
@@ -1110,6 +1375,7 @@
     if (!task) return;
     state.selectedId = task.id;
     if (task.isGroup && handle) return;
+    if (task.milestone && handle) return;
     e.preventDefault();
     var mode = handle ? (handle.getAttribute("data-handle") === "start" ? "resize-start" : "resize-end") : "move";
     pushHistory();
@@ -1141,15 +1407,24 @@
     });
     var task = getTask(drag.id);
     var idx = indexById(drag.id);
+    var cal = calendar();
     if (drag.mode === "move") {
       S.shiftBlock(state.tasks, idx, delta);
+      if (!task.isGroup && S.isISO(task.start)) {
+        task.end = S.endFromStartDuration(task.start, S.taskDuration(task), cal);
+      }
     } else if (drag.mode === "resize-end") {
-      var newDur = Math.max(1, drag.origDuration + delta);
+      var newDur = Math.max(1, (drag.origDuration || 1) + delta);
+      if (state.calendarMode === "workdays") {
+        var tentativeEnd = S.addDays(drag.origEnd, delta);
+        newDur = Math.max(1, S.inclusiveDuration(task.start, tentativeEnd, cal) || 1);
+      }
       task.duration = newDur;
-      task.end = S.endFromStartDuration(task.start, newDur);
+      task.milestone = false;
+      task.end = S.endFromStartDuration(task.start, newDur, cal);
     } else if (drag.mode === "resize-start") {
       var newStart = S.addDays(drag.origStart, delta);
-      var nd = S.inclusiveDuration(newStart, drag.origEnd);
+      var nd = S.inclusiveDuration(newStart, drag.origEnd, cal);
       if (!nd || nd < 1) {
         task.start = drag.origEnd;
         task.duration = 1;
@@ -1159,6 +1434,7 @@
         task.duration = nd;
         task.end = drag.origEnd;
       }
+      task.milestone = false;
     }
     runSchedule();
     syncComputedCells();
@@ -1170,9 +1446,13 @@
     window.removeEventListener("pointerup", onBarPointerUp);
     window.removeEventListener("pointercancel", onBarPointerUp);
     if (!drag) return;
-    var changed = JSON.stringify(drag.snapshot) !== JSON.stringify(state.tasks.map(function (t) {
-      return { id: t.id, start: t.start, end: t.end, duration: t.duration };
-    }));
+    var changed =
+      JSON.stringify(drag.snapshot) !==
+      JSON.stringify(
+        state.tasks.map(function (t) {
+          return { id: t.id, start: t.start, end: t.end, duration: t.duration };
+        })
+      );
     drag = null;
     if (!changed) {
       historyStack.pop();
@@ -1182,24 +1462,22 @@
     renderTimeline();
   }
 
-  /* scroll sync */
+  var syncingScroll = false;
   function onTimelineScroll() {
     $("timeline-header-clip").scrollLeft = $("timeline-body-scroll").scrollLeft;
-    if (!syncingScroll) {
+    if (!syncingScroll && state.view === "timeline") {
       syncingScroll = true;
       $("table-scroll").scrollTop = $("timeline-body-scroll").scrollTop;
       syncingScroll = false;
     }
   }
-  var syncingScroll = false;
   function onTableScroll() {
-    if (syncingScroll) return;
+    if (syncingScroll || state.view !== "timeline") return;
     syncingScroll = true;
     $("timeline-body-scroll").scrollTop = $("table-scroll").scrollTop;
     syncingScroll = false;
   }
 
-  /* splitter */
   function applySplit() {
     if (window.innerWidth <= 860) {
       $("task-pane").style.width = "";
@@ -1255,29 +1533,59 @@
   /* ---- export / import -------------------------------------------------- */
 
   function exportJSON() {
-    var data = {
-      version: 1,
-      projectName: state.projectName,
-      zoom: state.zoom,
-      nextNumber: state.nextNumber,
-      exportedAt: new Date().toISOString(),
-      tasks: state.tasks.map(function (t) {
-        return {
-          number: t.number,
-          name: t.name,
-          start: t.start,
-          end: t.end,
-          duration: t.duration,
-          progress: t.progress,
-          dependencies: t.dependencies,
-          assignee: t.assignee,
-          color: t.color,
-          indent: t.indent,
-          collapsed: !!t.collapsed,
-        };
-      }),
-    };
+    var data = persistPayload();
+    data.exportedAt = new Date().toISOString();
+    data.tasks = state.tasks.map(function (t) {
+      return {
+        number: t.number,
+        name: t.name,
+        start: t.start,
+        end: t.end,
+        duration: t.duration,
+        progress: t.progress,
+        dependencies: S.normalizeDeps(t.dependencies),
+        assignee: t.assignee,
+        allocation: t.allocation,
+        milestone: !!t.milestone,
+        baselineStart: t.baselineStart || null,
+        baselineEnd: t.baselineEnd || null,
+        variance: t.variance,
+        critical: !!t.critical,
+        color: t.color,
+        indent: t.indent,
+        collapsed: !!t.collapsed,
+      };
+    });
     downloadFile(slug(state.projectName) + ".json", "application/json", JSON.stringify(data, null, 2));
+  }
+
+  function currentProject() {
+    return {
+      projectName: state.projectName,
+      calendarMode: state.calendarMode,
+      holidays: state.holidays,
+      zoom: state.zoom,
+      today: S.todayISO(),
+      tasks: state.tasks,
+    };
+  }
+
+  function exportExcelBuffer() {
+    if (!XLSX || !Excel) throw new Error("Excel library failed to load.");
+    return Excel.writeBuffer(currentProject(), XLSX, S);
+  }
+
+  function exportExcel() {
+    try {
+      var buf = exportExcelBuffer();
+      var blob = new Blob([buf], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      downloadFile(slug(state.projectName) + ".xlsx", blob.type, blob);
+      toast("Downloaded Excel workbook");
+    } catch (err) {
+      toast("Excel export failed: " + err.message);
+    }
   }
 
   function slug(s) {
@@ -1303,8 +1611,39 @@
     }, 1000);
   }
 
-  function importJSONFile(file) {
+  function importFile(file) {
+    var name = (file.name || "").toLowerCase();
     var reader = new FileReader();
+    if (name.endsWith(".csv") || file.type === "text/csv") {
+      reader.onload = function () {
+        try {
+          var data = Excel.parseCSV(String(reader.result), S);
+          pushHistory();
+          if (!data.projectName) data.projectName = state.projectName;
+          applyProject(data);
+          toast("Imported CSV");
+        } catch (err) {
+          toast("Import failed: " + err.message);
+        }
+      };
+      reader.readAsText(file);
+      return;
+    }
+    if (name.endsWith(".xlsx") || name.endsWith(".xls") || /sheet|excel/.test(file.type || "")) {
+      reader.onload = function () {
+        try {
+          var data = Excel.parseWorkbook(new Uint8Array(reader.result), XLSX, S);
+          pushHistory();
+          if (!data.projectName) data.projectName = slug(file.name.replace(/\.(xlsx|xls)$/i, "")) || state.projectName;
+          applyProject(data);
+          toast("Imported Excel workbook");
+        } catch (err) {
+          toast("Import failed: " + err.message);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+      return;
+    }
     reader.onload = function () {
       try {
         var data = JSON.parse(String(reader.result));
@@ -1318,6 +1657,7 @@
     reader.readAsText(file);
   }
 
+  /* PNG export (custom canvas; includes baseline + milestones) */
   function exportPNG() {
     var range = lastRange || computeRange();
     var px = Math.max(10, Math.min(pxPerDay(), 22));
@@ -1329,7 +1669,7 @@
       dur: 44,
       end: 90,
       prog: 40,
-      deps: 64,
+      deps: 72,
       who: 90,
     };
     var tableW = col.id + col.name + col.start + col.dur + col.end + col.prog + col.deps + col.who;
@@ -1361,7 +1701,6 @@
 
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, width, height);
-
     ctx.fillStyle = text;
     ctx.font = "650 20px Instrument Sans, sans-serif";
     ctx.fillText(state.projectName || "Untitled project", pad, pad + 22);
@@ -1371,6 +1710,7 @@
     var starts = rows.map(function (t) { return t.start; }).filter(S.isISO);
     var ends = rows.map(function (t) { return t.end; }).filter(S.isISO);
     if (starts.length) sub += "  ·  " + formatLong(S.minISO.apply(null, starts)) + " – " + formatLong(S.maxISO.apply(null, ends));
+    if (state.calendarMode === "workdays") sub += "  ·  Workdays";
     ctx.fillText(sub, pad, pad + 42);
 
     var ox = pad;
@@ -1392,27 +1732,25 @@
 
     ctx.font = "600 10px Instrument Sans, sans-serif";
     ctx.fillStyle = faint;
-    var heads = [
+    [
       ["id", "ID"],
       ["name", "TASK"],
       ["start", "START"],
-      ["dur", "DAYS"],
+      ["dur", state.calendarMode === "workdays" ? "WD" : "DAYS"],
       ["end", "END"],
       ["prog", "%"],
       ["deps", "DEPS"],
       ["who", "ASSIGNEE"],
-    ];
-    heads.forEach(function (h) {
+    ].forEach(function (h) {
       ctx.fillText(h[1], colX(h[0]) + 8, oy + 18);
     });
 
-    /* timeline month bands + days */
     var tlX = ox + tableW + 8;
     var monthStart = range.start;
     var curMonth = monthStart.slice(0, 7);
     ctx.font = "600 10px Instrument Sans, sans-serif";
     ctx.fillStyle = soft;
-    function flushBand(from, to) {
+    function flushBand(from) {
       var x = tlX + S.diffDays(range.start, from) * px;
       ctx.fillText(monthLabel(from), x + 6, oy + 16);
       ctx.strokeStyle = line;
@@ -1424,12 +1762,12 @@
     S.eachDay(range.start, range.end, function (iso) {
       var key = iso.slice(0, 7);
       if (key !== curMonth) {
-        flushBand(monthStart, S.addDays(iso, -1));
+        flushBand(monthStart);
         curMonth = key;
         monthStart = iso;
       }
     });
-    flushBand(monthStart, range.end);
+    flushBand(monthStart);
 
     var today = S.todayISO();
     S.eachDay(range.start, range.end, function (iso, d) {
@@ -1444,7 +1782,6 @@
         ctx.fillText(String(d.getDate()), x + 2, oy + 34);
       }
     });
-
     if (today >= range.start && today <= range.end) {
       var tx = tlX + S.diffDays(range.start, today) * px + px / 2;
       ctx.strokeStyle = todayC;
@@ -1463,14 +1800,12 @@
       ctx.moveTo(ox, y + 0.5);
       ctx.lineTo(ox + tableW + 8 + tlW, y + 0.5);
       ctx.stroke();
-      ctx.fillStyle = text;
-      ctx.font = (task.isGroup ? "650 " : "") + "11px Instrument Sans, sans-serif";
       ctx.fillStyle = faint;
       ctx.font = "11px IBM Plex Mono, monospace";
       ctx.fillText("#" + task.number, colX("id") + 8, y + 18);
       ctx.fillStyle = text;
       ctx.font = (task.isGroup ? "650 " : "500 ") + "12px Instrument Sans, sans-serif";
-      var name = (task.indent ? "  ".repeat(task.indent) : "") + (task.name || "Untitled");
+      var name = (task.indent ? "  ".repeat(task.indent) : "") + (task.name || "Untitled") + (task.milestone ? "  ◆" : "");
       ctx.save();
       ctx.beginPath();
       ctx.rect(colX("name") + 6, y, col.name - 10, rowH);
@@ -1487,40 +1822,79 @@
       ctx.font = "12px Instrument Sans, sans-serif";
       ctx.fillText(task.assignee || "", colX("who") + 8, y + 18);
 
+      if (S.isISO(task.baselineStart) && S.isISO(task.baselineEnd)) {
+        var bx = tlX + S.diffDays(range.start, task.baselineStart) * px + 1;
+        var bw = Math.max(3, (S.diffDays(task.baselineStart, task.baselineEnd) + 1) * px - 2);
+        ctx.fillStyle = faint;
+        ctx.globalAlpha = 0.35;
+        ctx.fillRect(bx, y + 20, task.milestone ? 6 : bw, 4);
+        ctx.globalAlpha = 1;
+      }
       if (S.isISO(task.start) && S.isISO(task.end)) {
         var x = tlX + S.diffDays(range.start, task.start) * px + 1;
-        var w = Math.max(px - 2, (task.duration || 1) * px - 2);
-        var bh = task.isGroup ? 10 : 14;
-        var by = y + (rowH - bh) / 2;
-        roundRect(ctx, x, by, w, bh, 4);
-        ctx.fillStyle = task.color || PALETTE[0];
-        ctx.fill();
-        if (task.progress > 0) {
+        var w = Math.max(px - 2, (S.diffDays(task.start, task.end) + 1) * px - 2);
+        if (task.milestone) {
+          var mx = tlX + S.diffDays(range.start, task.start) * px + px / 2;
+          var my = y + rowH / 2;
           ctx.save();
-          ctx.beginPath();
-          roundRect(ctx, x, by, w, bh, 4);
-          ctx.clip();
-          ctx.fillStyle = "rgba(255,255,255,0.28)";
-          ctx.fillRect(x, by, w * (S.clampProgress(task.progress) / 100), bh);
+          ctx.translate(mx, my);
+          ctx.rotate(Math.PI / 4);
+          ctx.fillStyle = task.color || PALETTE[0];
+          ctx.fillRect(-5, -5, 10, 10);
+          if (task.critical && state.showCritical) {
+            ctx.strokeStyle = todayC;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(-5, -5, 10, 10);
+          }
           ctx.restore();
+        } else {
+          var bh = task.isGroup ? 10 : 14;
+          var by = y + (rowH - bh) / 2 - 2;
+          roundRect(ctx, x, by, w, bh, 4);
+          ctx.fillStyle = task.color || PALETTE[0];
+          ctx.fill();
+          if (task.critical && state.showCritical) {
+            ctx.strokeStyle = todayC;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.lineWidth = 1;
+          }
+          if (task.progress > 0) {
+            ctx.save();
+            ctx.beginPath();
+            roundRect(ctx, x, by, w, bh, 4);
+            ctx.clip();
+            ctx.fillStyle = "rgba(255,255,255,0.28)";
+            ctx.fillRect(x, by, w * (S.clampProgress(task.progress) / 100), bh);
+            ctx.restore();
+          }
         }
       }
     });
 
-    /* arrows on export */
     ctx.strokeStyle = faint;
     ctx.fillStyle = faint;
     ctx.lineWidth = 1.2;
     rows.forEach(function (task, i) {
-      (task.dependencies || []).forEach(function (depNum) {
-        var pred = S.findTaskByNumber(rows, depNum);
+      S.normalizeDeps(task.dependencies).forEach(function (dep) {
+        var pred = S.findTaskByNumber(rows, dep.pred);
         if (!pred || !S.isISO(pred.end) || !S.isISO(task.start)) return;
         var pi = rows.indexOf(pred);
         var y1 = oy + tlHead + pi * rowH + rowH / 2;
         var y2 = oy + tlHead + i * rowH + rowH / 2;
-        var x1 = tlX + S.diffDays(range.start, pred.end) * px + px - 1;
-        var x2 = tlX + S.diffDays(range.start, task.start) * px + 1;
+        var type = dep.type || "FS";
+        var x1 =
+          type === "SS" || type === "SF"
+            ? tlX + S.diffDays(range.start, pred.start) * px + 1
+            : tlX + S.diffDays(range.start, pred.end) * px + px - 1;
+        var x2 =
+          type === "FF" || type === "SF"
+            ? tlX + S.diffDays(range.start, task.end) * px + px - 1
+            : tlX + S.diffDays(range.start, task.start) * px + 1;
         var dx = Math.max(12, Math.abs(x2 - x1) / 2);
+        if (task.critical && pred.critical && state.showCritical) {
+          ctx.strokeStyle = todayC;
+        } else ctx.strokeStyle = faint;
         ctx.beginPath();
         ctx.moveTo(x1, y1);
         ctx.bezierCurveTo(x1 + dx, y1, x2 - dx, y2, x2, y2);
@@ -1549,7 +1923,49 @@
     ctx.closePath();
   }
 
-  /* ---- theme ------------------------------------------------------------ */
+  /* ---- holidays + theme ------------------------------------------------- */
+
+  function renderHolidayList() {
+    var list = $("holiday-list");
+    if (!list) return;
+    if (!state.holidays.length) {
+      list.innerHTML = '<li class="empty">No holidays yet.</li>';
+      return;
+    }
+    list.innerHTML = state.holidays
+      .map(function (iso) {
+        return (
+          "<li><span>" +
+          escapeAttr(iso) +
+          ' · ' +
+          escapeAttr(formatLong(iso)) +
+          '</span><button type="button" class="btn icon danger" data-remove-holiday="' +
+          escapeAttr(iso) +
+          '" aria-label="Remove ' +
+          escapeAttr(iso) +
+          '">&times;</button></li>'
+        );
+      })
+      .join("");
+  }
+
+  function addHoliday(iso) {
+    if (!S.isISO(iso)) return;
+    if (state.holidays.indexOf(iso) >= 0) return;
+    pushHistory();
+    state.holidays = S.uniqueSortedDates(state.holidays.concat([iso]));
+    runSchedule();
+    renderAll();
+    persist();
+  }
+
+  function removeHoliday(iso) {
+    pushHistory();
+    state.holidays = state.holidays.filter(function (d) { return d !== iso; });
+    runSchedule();
+    renderAll();
+    persist();
+  }
 
   function currentTheme() {
     return document.documentElement.getAttribute("data-theme") || "light";
@@ -1574,25 +1990,42 @@
   /* ---- boot ------------------------------------------------------------- */
 
   function bind() {
-    $("btn-add").addEventListener("click", function () {
-      addTask();
-    });
+    $("btn-add").addEventListener("click", function () { addTask(); });
     $("btn-new").addEventListener("click", newProject);
     $("btn-sample").addEventListener("click", loadSample);
     $("btn-export-json").addEventListener("click", exportJSON);
+    $("btn-export-xlsx").addEventListener("click", exportExcel);
     $("btn-export-png").addEventListener("click", exportPNG);
-    $("btn-import").addEventListener("click", function () {
-      $("import-file").click();
-    });
+    $("btn-import").addEventListener("click", function () { $("import-file").click(); });
     $("import-file").addEventListener("change", function (e) {
       var file = e.target.files && e.target.files[0];
       e.target.value = "";
-      if (file) importJSONFile(file);
+      if (file) importFile(file);
     });
     $("btn-undo").addEventListener("click", undo);
     $("btn-redo").addEventListener("click", redo);
     $("btn-theme").addEventListener("click", function () {
       applyTheme(currentTheme() === "dark" ? "light" : "dark");
+    });
+    $("btn-baseline").addEventListener("click", setBaseline);
+    $("btn-clear-baseline").addEventListener("click", clearBaseline);
+    $("chk-critical").addEventListener("change", function (e) {
+      state.showCritical = !!e.target.checked;
+      renderTimeline();
+      updateStatus();
+      persist();
+    });
+    $("btn-holidays").addEventListener("click", function () {
+      renderHolidayList();
+      $("holiday-dialog").showModal();
+    });
+    $("holiday-add").addEventListener("click", function () {
+      addHoliday($("holiday-date").value);
+      $("holiday-date").value = "";
+    });
+    $("holiday-list").addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-remove-holiday]");
+      if (btn) removeHoliday(btn.getAttribute("data-remove-holiday"));
     });
     $("project-title").addEventListener("focus", maybeCheckpoint);
     $("project-title").addEventListener("input", function (e) {
@@ -1606,6 +2039,25 @@
     document.querySelectorAll(".seg [data-zoom]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         state.zoom = btn.getAttribute("data-zoom");
+        renderZoom();
+        renderTimeline();
+        persist();
+      });
+    });
+    document.querySelectorAll(".seg [data-cal]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var mode = btn.getAttribute("data-cal");
+        if (mode === state.calendarMode) return;
+        pushHistory();
+        state.calendarMode = mode;
+        runSchedule();
+        renderAll();
+        persist();
+      });
+    });
+    document.querySelectorAll(".seg [data-view]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        state.view = btn.getAttribute("data-view");
         renderZoom();
         renderTimeline();
         persist();
@@ -1665,35 +2117,59 @@
   }
 
   window.GanttApp = {
-    getState: function () {
-      return clone(state);
-    },
+    getState: function () { return clone(state); },
     reschedule: runSchedule,
-    addTask: function (partial) {
-      return addTask(partial || {}, { silent: false });
-    },
+    addTask: function (partial) { return addTask(partial || {}, { silent: false }); },
     addTaskSilent: function (partial) {
       var t = addTask(partial || {}, { silent: true });
       renderAll();
       persist();
       return t;
     },
-    setField: function (id, field, value) {
-      onFieldInput(id, field, value);
-    },
-    loadSample: function () {
-      applyProject(sampleProject());
-    },
+    setField: function (id, field, value) { onFieldInput(id, field, value); },
+    loadSample: function () { applyProject(sampleProject()); },
     newProject: function () {
       state.projectName = "Untitled project";
       state.tasks = [];
       state.nextNumber = 1;
       state.selectedId = null;
+      state.calendarMode = "calendar";
+      state.holidays = [];
+      state.showCritical = false;
+      state.view = "timeline";
+      state.baselineSetAt = null;
       renderAll();
       persist();
     },
     render: renderAll,
     computeRange: computeRange,
+    setCalendarMode: function (mode) {
+      state.calendarMode = mode === "workdays" ? "workdays" : "calendar";
+      runSchedule();
+      renderAll();
+      persist();
+    },
+    setHolidays: function (list) {
+      state.holidays = S.uniqueSortedDates(list || []);
+      runSchedule();
+      renderAll();
+      persist();
+    },
+    setBaseline: setBaseline,
+    clearBaseline: clearBaseline,
+    setShowCritical: function (on) {
+      state.showCritical = !!on;
+      renderAll();
+      persist();
+    },
+    setView: function (view) {
+      state.view = view === "resources" ? "resources" : "timeline";
+      renderAll();
+      persist();
+    },
+    exportExcelBuffer: exportExcelBuffer,
+    importProject: function (data) { applyProject(data); },
+    sampleProject: sampleProject,
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
