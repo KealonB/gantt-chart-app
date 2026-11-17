@@ -7,7 +7,7 @@
  */
 import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import process from "node:process";
@@ -408,6 +408,7 @@ async function runBrowser(url) {
   });
 
   const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
   const errors = [];
   page.on("pageerror", (err) => errors.push(String(err)));
   page.on("console", (msg) => {
@@ -427,7 +428,7 @@ async function runBrowser(url) {
   assert(boot.hasApp, "window.GanttApp is exposed");
   assert(boot.hasSchedule, "window.GanttSchedule is exposed");
   assert(boot.hasExcel && boot.hasXLSX, "Excel library is loaded in the page");
-  eq(boot.version, "2", "page reports app version 2");
+  eq(boot.version, "3", "page reports app version 3");
 
   await page.evaluate(() => window.GanttApp.newProject());
 
@@ -535,7 +536,372 @@ async function runBrowser(url) {
   const wb = XLSX.read(Buffer.from(pageBuf), { type: "buffer" });
   assert(wb.SheetNames.indexOf("Tasks") >= 0 && wb.SheetNames.indexOf("Timeline") >= 0, "exported workbook has Tasks and Timeline sheets (" + wb.SheetNames.join(", ") + ")");
 
+  const shotDir = "/workspace/gantt-chart-app-shots";
+  mkdirSync(shotDir, { recursive: true });
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function shot(name) {
+    await page.screenshot({ path: shotDir + "/" + name, fullPage: false });
+  }
+
+  async function layout(width, height, touch) {
+    await page.setViewport({
+      width,
+      height,
+      deviceScaleFactor: 1,
+      hasTouch: !!touch,
+      isMobile: !!touch,
+    });
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    await sleep(80);
+  }
+
+  // Reload the sample so later viewports start from a known project.
+  await page.evaluate(() => window.GanttApp.loadSample());
+
+  /* Desktop command bar */
+  await layout(1280, 800, false);
+  const desktop = await page.evaluate(() => {
+    const bar = document.getElementById("command-bar");
+    const overflow = document.getElementById("btn-overflow");
+    const menuRow = document.getElementById("menu-row");
+    const nav = document.getElementById("mobile-nav");
+    const taskPane = document.getElementById("task-pane");
+    const tlPane = document.getElementById("timeline-pane");
+    const triggers = [...document.querySelectorAll(".menu-trigger")].map((b) => ({
+      label: b.textContent.trim(),
+      h: Math.round(b.getBoundingClientRect().height),
+      visible: b.getBoundingClientRect().height > 0 && getComputedStyle(b).display !== "none",
+    }));
+    const icons = [...document.querySelectorAll(".command-bar .icon-row .btn")].map((b) =>
+      Math.round(b.getBoundingClientRect().height)
+    );
+    window.GanttApp.openMenu("file");
+    const fileOpen = window.GanttApp.isMenuOpen();
+    const fileItems = [...document.querySelectorAll("#menu-file button")].map((b) => b.id || b.textContent.trim());
+    return {
+      barH: bar ? Math.round(bar.getBoundingClientRect().height) : 0,
+      overflowHidden: overflow && getComputedStyle(overflow).display === "none",
+      menusVisible: menuRow && getComputedStyle(menuRow).display !== "none",
+      navHidden: nav && getComputedStyle(nav).display === "none",
+      bothPanes:
+        taskPane.getBoundingClientRect().width > 80 && tlPane.getBoundingClientRect().width > 80,
+      mobile: window.GanttApp.isMobileLayout(),
+      triggers,
+      icons,
+      fileOpen,
+      fileItems,
+    };
+  });
+  assert(!desktop.mobile, "1280x800 is not the mobile layout");
+  assert(desktop.overflowHidden, "hamburger is hidden on desktop");
+  assert(desktop.menusVisible, "File/Edit/View/Schedule menus are visible on desktop");
+  assert(desktop.navHidden, "mobile pane switcher is hidden on desktop");
+  assert(desktop.bothPanes, "table and timeline sit side by side on desktop");
+  assert(desktop.fileOpen, "File menu opens");
+  assert(desktop.fileItems.indexOf("btn-new") >= 0 && desktop.fileItems.indexOf("btn-export-xlsx") >= 0, "File menu lists project actions");
+  assert(desktop.triggers.every((t) => t.visible && t.h >= 44), "menu triggers are at least 44px (" + JSON.stringify(desktop.triggers) + ")");
+  assert(desktop.icons.every((h) => h >= 44), "icon-row buttons are at least 44px (" + desktop.icons.join(",") + ")");
+
+  const reachableDesktop = await page.evaluate(() => {
+    const need = ["file", "edit", "view", "schedule"];
+    const missing = [];
+    need.forEach((name) => {
+      window.GanttApp.openMenu(name);
+      const pop = document.querySelector('.menu[data-menu="' + name + '"] .menu-pop');
+      const buttons = pop ? [...pop.querySelectorAll("button:not([hidden])")] : [];
+      if (!buttons.length) missing.push(name + ":empty");
+    });
+    window.GanttApp.closeMenus();
+    return missing;
+  });
+  assert(reachableDesktop.length === 0, "every desktop menu has reachable items (" + reachableDesktop.join(", ") + ")");
+
+  // Close via Escape and outside click
+  await page.evaluate(() => window.GanttApp.openMenu("edit"));
+  await page.keyboard.press("Escape");
+  const escClosed = await page.evaluate(() => !window.GanttApp.isMenuOpen());
+  assert(escClosed, "Escape closes an open menu");
+  await page.evaluate(() => window.GanttApp.openMenu("view"));
+  await page.mouse.click(10, 200);
+  const outsideClosed = await page.evaluate(() => !window.GanttApp.isMenuOpen());
+  assert(outsideClosed, "a click outside closes an open menu");
+
+  await page.evaluate(() => window.GanttApp.openMenu("file"));
+  await shot("desktop-1280x800-file-menu.png");
+  await page.evaluate(() => window.GanttApp.closeMenus());
+  await shot("desktop-1280x800.png");
+
+  /* Tablet portrait */
+  await layout(820, 1180, true);
+  const tablet = await page.evaluate(() => {
+    const overflow = document.getElementById("btn-overflow");
+    const menuRow = document.getElementById("menu-row");
+    const nav = document.getElementById("mobile-nav");
+    const taskPane = document.getElementById("task-pane");
+    const tlPane = document.getElementById("timeline-pane");
+    window.GanttApp.setMobilePane("timeline");
+    const tl = {
+      taskW: taskPane.getBoundingClientRect().width,
+      tlW: tlPane.getBoundingClientRect().width,
+    };
+    window.GanttApp.setMobilePane("table");
+    const table = {
+      taskW: taskPane.getBoundingClientRect().width,
+      tlW: tlPane.getBoundingClientRect().width,
+    };
+    const nameCell = document.querySelector("#task-table th.col-name, #task-table td.col-name");
+    const nameSticky = nameCell && getComputedStyle(nameCell).position === "sticky";
+    const navBtns = [...document.querySelectorAll("#mobile-nav button")].map((b) =>
+      Math.round(b.getBoundingClientRect().height)
+    );
+    window.GanttApp.openSheet();
+    const sheetOpen = window.GanttApp.isSheetOpen();
+    const sheetItems = [...document.querySelectorAll("#overflow-sheet .sheet-item")].map((b) =>
+      b.getAttribute("data-action") || b.getAttribute("data-zoom") || b.getAttribute("data-cal")
+    );
+    const sheetH = [...document.querySelectorAll("#overflow-sheet .sheet-item")].filter((b) => !b.hidden).map((b) =>
+      Math.round(b.getBoundingClientRect().height)
+    );
+    return {
+      mobile: window.GanttApp.isMobileLayout(),
+      overflowVisible: overflow && getComputedStyle(overflow).display !== "none",
+      menusHidden: menuRow && getComputedStyle(menuRow).display === "none",
+      navVisible: nav && getComputedStyle(nav).display !== "none",
+      tl,
+      table,
+      nameSticky,
+      navBtns,
+      sheetOpen,
+      sheetItems,
+      sheetH,
+    };
+  });
+  assert(tablet.mobile, "820x1180 uses the compact mobile layout");
+  assert(tablet.overflowVisible, "hamburger is visible on tablet");
+  assert(tablet.menusHidden, "desktop menus hide on tablet");
+  assert(tablet.navVisible, "Table/Timeline/Resources tabs show on tablet");
+  assert(tablet.tl.tlW > 200 && tablet.tl.taskW < 20, "timeline tab hides the table on tablet");
+  assert(tablet.table.taskW > 200 && tablet.table.tlW < 20, "table tab hides the timeline on tablet");
+  assert(tablet.nameSticky, "task name column is sticky on the table");
+  assert(tablet.navBtns.every((h) => h >= 44), "mobile nav targets are at least 44px (" + tablet.navBtns.join(",") + ")");
+  assert(tablet.sheetOpen, "overflow sheet opens");
+  ["new", "sample", "import", "export-json", "export-xlsx", "export-png", "install", "undo", "redo", "add", "indent", "outdent", "critical", "theme", "holidays", "baseline", "clear-baseline", "day", "week", "month", "calendar", "workdays"].forEach((key) => {
+    assert(tablet.sheetItems.indexOf(key) >= 0, "overflow sheet can reach " + key);
+  });
+  assert(tablet.sheetH.every((h) => h >= 44), "sheet items are at least 44px (" + tablet.sheetH.join(",") + ")");
+  await shot("tablet-820x1180-sheet.png");
+  await page.keyboard.press("Escape");
+  const sheetEsc = await page.evaluate(() => !window.GanttApp.isSheetOpen());
+  assert(sheetEsc, "Escape closes the overflow sheet");
+  await page.evaluate(() => {
+    window.GanttApp.setMobilePane("timeline");
+  });
+  await shot("tablet-820x1180.png");
+
+  /* Phone */
+  await layout(390, 844, true);
+  const phone = await page.evaluate(() => {
+    window.GanttApp.setMobilePane("timeline");
+    const navH = Math.round(document.getElementById("mobile-nav").getBoundingClientRect().height);
+    const bars = document.querySelectorAll(".bar").length;
+    const grips = document.querySelectorAll(".bar-grip").length;
+    return {
+      mobile: window.GanttApp.isMobileLayout(),
+      navH,
+      bars,
+      grips,
+      pane: window.GanttApp.getState().mobilePane,
+    };
+  });
+  assert(phone.mobile, "390x844 uses the compact mobile layout");
+  assert(phone.navH >= 44, "phone pane switcher is tall enough (" + phone.navH + "px)");
+  assert(phone.bars >= 1 && phone.grips >= 1, "timeline bars and drag grips render on the phone");
+  await shot("phone-390x844-timeline.png");
+
+  await page.evaluate(() => window.GanttApp.setMobilePane("table"));
+  const phoneTable = await page.evaluate(() => ({
+    taskW: document.getElementById("task-pane").getBoundingClientRect().width,
+    rows: document.querySelectorAll("#task-body tr").length,
+  }));
+  assert(phoneTable.taskW > 200 && phoneTable.rows >= 1, "phone table tab shows the task list");
+  await shot("phone-390x844-table.png");
+
+  await page.evaluate(() => window.GanttApp.setMobilePane("resources"));
+  const phoneRes = await page.evaluate(() => ({
+    view: window.GanttApp.getState().view,
+    rows: document.querySelectorAll(".res-row").length,
+    shown: !document.getElementById("resource-canvas").hidden,
+  }));
+  eq(phoneRes.view, "resources", "phone resources tab selects the resource view");
+  assert(phoneRes.rows >= 3 && phoneRes.shown, "phone resources tab renders the workload view");
+  await shot("phone-390x844-resources.png");
+
+  /* Touch drag via the grip (immediate, no long-press) */
+  await page.evaluate(() => window.GanttApp.setMobilePane("timeline"));
+  await sleep(120);
+  const dragged = await page.evaluate(async () => {
+    const grip = document.querySelector(".bar .bar-grip");
+    if (!grip) return { ok: false, reason: "no grip" };
+    const taskId = grip.closest(".bar").dataset.id;
+    const before = window.GanttApp.getState().tasks.find((t) => t.id === taskId);
+    const r = grip.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    function fire(type, cx, target) {
+      target.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: "touch",
+          clientX: cx,
+          clientY: y,
+        })
+      );
+    }
+    fire("pointerdown", x, grip);
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType: "touch",
+        clientX: x + 80,
+        clientY: y,
+      })
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType: "touch",
+        clientX: x + 80,
+        clientY: y,
+      })
+    );
+    const after = window.GanttApp.getState().tasks.find((t) => t.id === taskId);
+    return { ok: true, before: before.start, after: after.start, id: taskId };
+  });
+  assert(dragged.ok, "found a bar grip to drag on the phone");
+  assert(dragged.before !== dragged.after, "touch-dragging a bar grip moves the task (" + dragged.before + " -> " + dragged.after + ")");
+
+  /* PWA manifest + service worker */
+  await layout(1280, 800, false);
+  const pwa = await page.evaluate(async () => {
+    const link = document.querySelector('link[rel="manifest"]');
+    let manifest = null;
+    let manifestStatus = 0;
+    if (link) {
+      const res = await fetch(link.href);
+      manifestStatus = res.status;
+      manifest = await res.json();
+    }
+    const start = Date.now();
+    let ready = null;
+    if ("serviceWorker" in navigator) {
+      ready = await navigator.serviceWorker.ready;
+      while (!navigator.serviceWorker.controller && Date.now() - start < 8000) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    const cachesFound = await caches.keys();
+    const cached = cachesFound.length
+      ? await caches.open(cachesFound.sort().reverse()[0]).then((c) => c.keys()).then((keys) => keys.map((k) => new URL(k.url).pathname))
+      : [];
+    return {
+      manifestStatus,
+      manifest,
+      appleIcon: !!document.querySelector('link[rel="apple-touch-icon"]'),
+      swReady: !!(ready && ready.active),
+      swUrl: ready && ready.active && ready.active.scriptURL,
+      controlled: !!navigator.serviceWorker.controller,
+      cachesFound,
+      cached,
+    };
+  });
+  eq(pwa.manifestStatus, 200, "manifest.webmanifest loads");
+  assert(pwa.manifest && pwa.manifest.name === "Gantt" && pwa.manifest.short_name === "Gantt", "manifest has name and short_name");
+  assert(pwa.manifest.start_url === "./" && pwa.manifest.scope === "./", "manifest start_url and scope are relative for the /gantt-chart-app/ subpath");
+  eq(pwa.manifest.display, "standalone", "manifest display is standalone");
+  assert(pwa.manifest.theme_color && pwa.manifest.background_color, "manifest has theme and background colors");
+  const iconPurposes = (pwa.manifest.icons || []).map((i) => i.purpose + ":" + i.sizes);
+  assert(iconPurposes.some((s) => s.indexOf("any:192x192") >= 0), "manifest includes a 192 PNG");
+  assert(iconPurposes.some((s) => s.indexOf("any:512x512") >= 0), "manifest includes a 512 PNG");
+  assert(iconPurposes.some((s) => s.indexOf("maskable") >= 0), "manifest includes a maskable icon");
+  assert(pwa.appleIcon, "apple-touch-icon link is present");
+  assert(pwa.swReady, "service worker is active (" + pwa.swUrl + ")");
+  assert(pwa.controlled, "the page is controlled by the service worker");
+  assert(pwa.cachesFound.some((k) => /gantt-shell-v3/.test(k)), "versioned shell cache gantt-shell-v3 exists (" + pwa.cachesFound.join(", ") + ")");
+  assert(pwa.cached.some((path) => path.endsWith("/app.js")) && pwa.cached.some((path) => path.endsWith("/xlsx.bundle.js")), "app shell and vendor lib are cached (" + pwa.cached.join(", ") + ")");
+
+  const installUi = await page.evaluate(() => ({
+    menu: !!document.getElementById("btn-install"),
+    sheet: !!document.querySelector("[data-install-item]"),
+    dialog: !!document.getElementById("install-dialog"),
+    iosCopy: (document.getElementById("install-ios-copy") || {}).textContent || "",
+  }));
+  assert(installUi.menu && installUi.sheet, "Install app appears in the File menu and overflow sheet");
+  assert(installUi.dialog && /Add to Home Screen/.test(installUi.iosCopy), "iOS Add to Home Screen instructions exist as a fallback");
+
   assert(errors.length === 0, "no page or console errors" + (errors.length ? ": " + errors.join(" | ") : ""));
+
+  /* Offline reload — ignore expected font/network console noise */
+  const offlineErrors = [];
+  const ignoreNet = (text) =>
+    /ERR_INTERNET_DISCONNECTED|ERR_FAILED|Failed to load resource|net::|fonts\\.(googleapis|gstatic)/.test(text);
+  const offlineHandler = (msg) => {
+    if (msg.type() === "error" && !ignoreNet(msg.text())) offlineErrors.push("console.error: " + msg.text());
+  };
+  const offlinePageErr = (err) => {
+    if (!ignoreNet(String(err))) offlineErrors.push(String(err));
+  };
+  page.on("console", offlineHandler);
+  page.on("pageerror", offlinePageErr);
+
+  const client = await page.createCDPSession();
+  await client.send("Network.emulateNetworkConditions", {
+    offline: true,
+    downloadThroughput: 0,
+    uploadThroughput: 0,
+    latency: 0,
+  });
+  const offlineRes = await page.reload({ waitUntil: "domcontentloaded", timeout: 20000 });
+  await sleep(400);
+  const offline = await page.evaluate(() => {
+    window.GanttApp.newProject();
+    const t = window.GanttApp.addTaskSilent({
+      name: "Offline task",
+      start: "2026-11-15",
+      duration: 3,
+    });
+    const bar = document.querySelector('.bar[data-id="' + t.id + '"]');
+    return {
+      version: document.querySelector('meta[name="gantt-app-version"]')?.content,
+      hasApp: typeof window.GanttApp === "object",
+      name: t.name,
+      end: window.GanttApp.getState().tasks[0].end,
+      hasBar: !!bar,
+    };
+  });
+  assert(offlineRes && offlineRes.status() !== 0, "offline reload is served from the cache (status " + (offlineRes && offlineRes.status()) + ")");
+  eq(offline.version, "3", "offline page is still app version 3");
+  assert(offline.hasApp && offline.hasBar, "the app still runs offline and can render a bar");
+  eq(offline.end, "2026-11-17", "offline scheduling still fills the end date");
+  assert(offlineErrors.length === 0, "no unexpected errors while offline" + (offlineErrors.length ? ": " + offlineErrors.join(" | ") : ""));
+
+  await client.send("Network.emulateNetworkConditions", {
+    offline: false,
+    downloadThroughput: -1,
+    uploadThroughput: -1,
+    latency: 0,
+  });
 
   await browser.close();
 }

@@ -2,12 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="description" content="A lightweight, in-browser Gantt chart creator. Prerelease." />
     <meta name="color-scheme" content="light dark" />
-    <meta name="gantt-app-version" content="2" />
+    <meta name="theme-color" content="#0f766e" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Gantt" />
+    <meta name="gantt-app-version" content="3" />
     <title>Gantt — Prerelease</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Crect x='6' y='8' width='14' height='4' rx='1' fill='white'/%3E%3Crect x='10' y='14' width='16' height='4' rx='1' fill='white' opacity='.85'/%3E%3Crect x='8' y='20' width='10' height='4' rx='1' fill='white' opacity='.7'/%3E%3C/svg%3E" />
+    <link rel="icon" href="icons/icon-192.png" sizes="192x192" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+    <link rel="manifest" href="manifest.webmanifest" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;650;700&display=swap" rel="stylesheet" />
@@ -15,7 +20,10 @@
   </head>
   <body>
     <div id="app">
-      <header class="app-header">
+      <header class="command-bar" id="command-bar">
+        <button type="button" class="btn icon ghost" id="btn-overflow" aria-label="Open menu" aria-expanded="false" aria-controls="overflow-sheet" title="Menu">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" /></svg>
+        </button>
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
@@ -35,61 +43,81 @@
           aria-label="Project name"
           placeholder="Untitled project"
         />
-        <div class="toolbar">
-          <button class="btn" id="btn-new" title="Clear the current project">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3h10v10H3zM6 8h4" /></svg>
-            New
-          </button>
-          <button class="btn" id="btn-sample" title="Load a sample project">Load sample</button>
-          <span class="sep"></span>
-          <button class="btn" id="btn-import" title="Import JSON, Excel, or CSV">Import</button>
-          <button class="btn" id="btn-export-json" title="Download the project as JSON">Export JSON</button>
-          <button class="btn" id="btn-export-xlsx" title="Download an Excel workbook with a Tasks sheet and a colored Timeline">Export Excel</button>
-          <button class="btn" id="btn-export-png" title="Download a PNG of the chart">Export PNG</button>
-          <input id="import-file" type="file" accept="application/json,.json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,.xls,text/csv,.csv" hidden />
-          <span class="sep"></span>
-          <div class="seg" role="group" aria-label="Timeline zoom">
-            <button type="button" data-zoom="day" aria-pressed="false">Day</button>
-            <button type="button" data-zoom="week" aria-pressed="true">Week</button>
-            <button type="button" data-zoom="month" aria-pressed="false">Month</button>
+
+        <nav class="menu-row" id="menu-row" aria-label="App menus">
+          <div class="menu" data-menu="file">
+            <button type="button" class="menu-trigger" aria-haspopup="true" aria-expanded="false" aria-controls="menu-file">File</button>
+            <div class="menu-pop" id="menu-file" role="menu" hidden>
+              <button type="button" role="menuitem" id="btn-new" title="Clear the current project">New project</button>
+              <button type="button" role="menuitem" id="btn-sample" title="Load a sample project">Load sample</button>
+              <button type="button" role="menuitem" id="btn-import" title="Import JSON, Excel, or CSV">Import…</button>
+              <div class="menu-sep"></div>
+              <button type="button" role="menuitem" id="btn-export-json" title="Download the project as JSON">Export JSON</button>
+              <button type="button" role="menuitem" id="btn-export-xlsx" title="Download an Excel workbook with a Tasks sheet and a colored Timeline">Export Excel</button>
+              <button type="button" role="menuitem" id="btn-export-png" title="Download a PNG of the chart">Export PNG</button>
+              <div class="menu-sep"></div>
+              <button type="button" role="menuitem" id="btn-install" hidden>Install app</button>
+            </div>
           </div>
-          <button class="btn icon" id="btn-undo" title="Undo (Ctrl+Z)" aria-label="Undo">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h7.5a3.5 3.5 0 1 1 0 7H10M4 7l3-3M4 7l3 3" /></svg>
+          <div class="menu" data-menu="edit">
+            <button type="button" class="menu-trigger" aria-haspopup="true" aria-expanded="false" aria-controls="menu-edit">Edit</button>
+            <div class="menu-pop" id="menu-edit" role="menu" hidden>
+              <button type="button" role="menuitem" data-action="undo">Undo</button>
+              <button type="button" role="menuitem" data-action="redo">Redo</button>
+              <div class="menu-sep"></div>
+              <button type="button" role="menuitem" data-action="add">Add task</button>
+              <button type="button" role="menuitem" id="btn-indent" data-action="indent">Indent</button>
+              <button type="button" role="menuitem" id="btn-outdent" data-action="outdent">Outdent</button>
+            </div>
+          </div>
+          <div class="menu" data-menu="view">
+            <button type="button" class="menu-trigger" aria-haspopup="true" aria-expanded="false" aria-controls="menu-view">View</button>
+            <div class="menu-pop" id="menu-view" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-zoom="day">Day zoom</button>
+              <button type="button" role="menuitemradio" data-zoom="week">Week zoom</button>
+              <button type="button" role="menuitemradio" data-zoom="month">Month zoom</button>
+              <div class="menu-sep"></div>
+              <button type="button" role="menuitemradio" data-view="timeline">Timeline</button>
+              <button type="button" role="menuitemradio" data-view="resources">Resources</button>
+              <div class="menu-sep"></div>
+              <button type="button" role="menuitemcheckbox" id="chk-critical" aria-checked="false">Critical path</button>
+              <button type="button" role="menuitem" data-action="theme" id="menu-theme">Toggle theme</button>
+            </div>
+          </div>
+          <div class="menu" data-menu="schedule">
+            <button type="button" class="menu-trigger" aria-haspopup="true" aria-expanded="false" aria-controls="menu-schedule">Schedule</button>
+            <div class="menu-pop" id="menu-schedule" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-cal="calendar">Calendar days</button>
+              <button type="button" role="menuitemradio" data-cal="workdays">Workdays</button>
+              <button type="button" role="menuitem" id="btn-holidays" title="Dates skipped in workdays mode">Holidays…</button>
+              <div class="menu-sep"></div>
+              <button type="button" role="menuitem" id="btn-baseline" title="Save the current dates as the planned baseline">Set baseline</button>
+              <button type="button" role="menuitem" id="btn-clear-baseline" title="Remove the saved baseline">Clear baseline</button>
+            </div>
+          </div>
+        </nav>
+
+        <div class="icon-row">
+          <button type="button" class="btn icon primary" id="btn-add-header" title="Add task" aria-label="Add task">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
           </button>
-          <button class="btn icon" id="btn-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 7H4.5a3.5 3.5 0 1 0 0 7H6M12 7l-3-3M12 7l-3 3" /></svg>
+          <button type="button" class="btn icon ghost" id="btn-undo" title="Undo (Ctrl+Z)" aria-label="Undo">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h7.5a3.5 3.5 0 1 1 0 7H10M4 7l3-3M4 7l3 3" /></svg>
           </button>
-          <button class="btn icon" id="btn-theme" title="Toggle light or dark theme" aria-label="Toggle theme">
-            <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+          <button type="button" class="btn icon ghost" id="btn-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 7H4.5a3.5 3.5 0 1 0 0 7H6M12 7l-3-3M12 7l-3 3" /></svg>
+          </button>
+          <button type="button" class="btn icon ghost" id="btn-theme" title="Toggle light or dark theme" aria-label="Toggle theme">
+            <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
               <circle cx="8" cy="8" r="3" />
               <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M3.2 12.8l1.4-1.4M11.4 4.6l1.4-1.4" />
             </svg>
           </button>
         </div>
+        <input id="import-file" type="file" accept="application/json,.json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,.xls,text/csv,.csv" hidden />
       </header>
 
-      <div class="app-subbar">
-        <div class="seg" role="group" aria-label="Scheduling calendar">
-          <button type="button" data-cal="calendar" aria-pressed="true">Calendar days</button>
-          <button type="button" data-cal="workdays" aria-pressed="false">Workdays</button>
-        </div>
-        <button class="btn" id="btn-holidays" title="Dates skipped in workdays mode">Holidays</button>
-        <span class="sep"></span>
-        <label class="chk">
-          <input type="checkbox" id="chk-critical" />
-          Critical path
-        </label>
-        <span class="sep"></span>
-        <button class="btn" id="btn-baseline" title="Save the current dates as the planned baseline">Set baseline</button>
-        <button class="btn" id="btn-clear-baseline" title="Remove the saved baseline">Clear baseline</button>
-        <span class="sep"></span>
-        <div class="seg" role="group" aria-label="Right pane view">
-          <button type="button" data-view="timeline" aria-pressed="true">Timeline</button>
-          <button type="button" data-view="resources" aria-pressed="false">Resources</button>
-        </div>
-      </div>
-
-      <main class="workspace">
+      <main class="workspace" id="workspace">
         <section class="task-pane" id="task-pane" aria-label="Task list">
           <div class="table-scroll" id="table-scroll">
             <table class="task-table" id="task-table">
@@ -116,7 +144,7 @@
           </div>
           <div class="table-footer">
             <button class="btn primary" id="btn-add">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3v10M3 8h10" /></svg>
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
               Add task
             </button>
             <span id="task-count" class="text-faint"></span>
@@ -142,7 +170,72 @@
         <span id="status-calendar"></span>
         <span id="status-cycle" class="cycle-warn" hidden></span>
       </footer>
+
+      <nav class="mobile-nav" id="mobile-nav" aria-label="Pane switcher">
+        <button type="button" data-pane="table" aria-pressed="false">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2.5 3.5h11v9h-11zM2.5 6.5h11M6.5 3.5v9" /></svg>
+          Table
+        </button>
+        <button type="button" data-pane="timeline" aria-pressed="true">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="2" y="3" width="7" height="2.4" rx="0.7" /><rect x="4" y="6.8" width="10" height="2.4" rx="0.7" /><rect x="3" y="10.6" width="6" height="2.4" rx="0.7" /></svg>
+          Timeline
+        </button>
+        <button type="button" data-pane="resources" aria-pressed="false">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="6" cy="5" r="2" /><path d="M3 12c0-2 1.4-3 3-3s3 1 3 3M11 7.5v5M9.5 9.5H12.5" /></svg>
+          Resources
+        </button>
+      </nav>
     </div>
+
+    <div class="sheet" id="overflow-sheet" hidden>
+      <div class="sheet-backdrop" data-close-sheet></div>
+      <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title" tabindex="-1">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <div class="sheet-head">
+          <h2 id="sheet-title">Menu</h2>
+          <button type="button" class="btn icon ghost" id="btn-sheet-close" aria-label="Close menu">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+          </button>
+        </div>
+        <div class="sheet-body">
+          <section>
+            <h3>File</h3>
+            <button type="button" class="sheet-item" data-action="new">New project</button>
+            <button type="button" class="sheet-item" data-action="sample">Load sample</button>
+            <button type="button" class="sheet-item" data-action="import">Import…</button>
+            <button type="button" class="sheet-item" data-action="export-json">Export JSON</button>
+            <button type="button" class="sheet-item" data-action="export-xlsx">Export Excel</button>
+            <button type="button" class="sheet-item" data-action="export-png">Export PNG</button>
+            <button type="button" class="sheet-item" data-action="install" data-install-item hidden>Install app</button>
+          </section>
+          <section>
+            <h3>Edit</h3>
+            <button type="button" class="sheet-item" data-action="undo">Undo</button>
+            <button type="button" class="sheet-item" data-action="redo">Redo</button>
+            <button type="button" class="sheet-item" data-action="add">Add task</button>
+            <button type="button" class="sheet-item" data-action="indent">Indent</button>
+            <button type="button" class="sheet-item" data-action="outdent">Outdent</button>
+          </section>
+          <section>
+            <h3>View</h3>
+            <button type="button" class="sheet-item" data-zoom="day">Day zoom</button>
+            <button type="button" class="sheet-item" data-zoom="week">Week zoom</button>
+            <button type="button" class="sheet-item" data-zoom="month">Month zoom</button>
+            <button type="button" class="sheet-item" data-action="critical" data-critical-item>Critical path</button>
+            <button type="button" class="sheet-item" data-action="theme">Toggle theme</button>
+          </section>
+          <section>
+            <h3>Schedule</h3>
+            <button type="button" class="sheet-item" data-cal="calendar">Calendar days</button>
+            <button type="button" class="sheet-item" data-cal="workdays">Workdays</button>
+            <button type="button" class="sheet-item" data-action="holidays">Holidays…</button>
+            <button type="button" class="sheet-item" data-action="baseline">Set baseline</button>
+            <button type="button" class="sheet-item" data-action="clear-baseline">Clear baseline</button>
+          </section>
+        </div>
+      </div>
+    </div>
+
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
     <dialog class="modal" id="holiday-dialog">
@@ -156,6 +249,18 @@
         </div>
         <div class="modal-actions">
           <button type="submit" class="btn" value="close">Done</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="install-dialog">
+      <form method="dialog" class="modal-card">
+        <h2>Install Gantt</h2>
+        <p class="modal-lead" id="install-ios-copy">
+          On iPhone or iPad, open the Share menu in Safari, then choose <strong>Add to Home Screen</strong>. The app will appear on your home screen and can work offline.
+        </p>
+        <div class="modal-actions">
+          <button type="submit" class="btn primary" value="close">Got it</button>
         </div>
       </form>
     </dialog>

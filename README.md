@@ -16,12 +16,15 @@ This is a **prerelease** for early testing.
 - **Critical path:** a CPM forward/backward pass computes total float and highlights critical bars and arrows (toggle it on from the toolbar).
 - **Milestones** are zero-duration tasks drawn as diamonds.
 - **Baselines:** Set baseline saves a snapshot of planned dates. Ghost bars show the plan under the actual bars, and the Var column shows finish slip (or pull-in) in the current day unit. Clear baseline removes the snapshot.
-- Timeline with day, week, and month zoom, a today line, weekend shading, and dependency arrows. Drag bars to move them, or drag either edge to resize.
+- Timeline with day, week, and month zoom, a today line, weekend shading, and dependency arrows. Drag bars to move them, or drag either edge to resize. On a touch screen, use the grip on a bar or long-press it so a swipe can still scroll.
 - **Resource workload view:** a heat strip per assignee, per day, with overallocation flagged when a person is over 100% (allocation % per task is optional; it defaults to 100).
 - Autosave to `localStorage` in this browser (older saved projects are migrated automatically)
 - Export / import JSON, **Excel (.xlsx)** (a formatted Tasks sheet plus a cell-colored Timeline sheet), CSV import, and PNG export
 - Load a sample project, or start a new one
+- A compact command bar with File, Edit, View, and Schedule menus on desktop, and a hamburger plus bottom sheet on phones and tablets
+- On narrow screens, switch between Table, Timeline, and Resources tabs instead of side-by-side panes; the task name column stays sticky while the table scrolls sideways
 - Light and dark themes, plus undo / redo
+- **Installable PWA:** add it to your home screen or desktop, use it offline, and reload when an update is available
 
 ## Usage
 
@@ -32,8 +35,9 @@ This is a **prerelease** for early testing.
 5. Check **MS** to make a milestone, or set duration to 0.
 6. Switch **Workdays** if duration should skip weekends. Open **Holidays** to add dates such as Thanksgiving.
 7. Turn on **Critical path** to see the chain that sets the finish date. **Set baseline** once a plan is agreed, then watch **Var** as dates move.
-8. Open the **Resources** view to see each assignee's load and any days over 100%.
+8. Open the **Resources** view to see each assignee's load and any days over 100%. On a phone, use the **Table**, **Timeline**, and **Resources** tabs at the bottom.
 9. Your work is saved automatically in this browser. Use **Export JSON** or **Export Excel** for a portable backup, or **Export PNG** for a snapshot.
+10. To install the app, choose **Install app** in the File menu (or the overflow menu on a phone). On iPhone or iPad, use Safari's Share menu, then **Add to Home Screen**.
 
 ### Keyboard
 
@@ -71,10 +75,13 @@ https://kealonb.github.io/gantt-chart-app/
 | File | Role |
 | --- | --- |
 | `index.html` | App shell |
-| `styles.css` | Layout, light/dark theme |
+| `styles.css` | Layout, light/dark theme, command bar |
 | `schedule.js` | Date math, calendars, dependencies, CPM, group rollups |
 | `excel.js` | Excel and CSV import/export |
-| `app.js` | UI, persistence, views |
+| `app.js` | UI, persistence, views, PWA install |
+| `manifest.webmanifest` | Installable app name, icons, and standalone display |
+| `sw.js` | Versioned service worker that caches the app shell for offline use |
+| `icons/` | PNG icons (192, 512, maskable, and Apple touch) |
 | `vendor/xlsx.bundle.js` | SheetJS-compatible library with cell styling (xlsx-js-style 1.2.0) |
 | `test/run.mjs` | Headless unit and browser checks |
 
@@ -89,4 +96,6 @@ https://kealonb.github.io/gantt-chart-app/
 - Excel Timeline coloring uses one column per day (or per week if the span is long). Very long projects make a wide sheet.
 - Data lives in this browser's `localStorage` only — it is not synced across devices unless you export/import.
 - There is no multi-user editing or resource leveling (the resource view is diagnostic only).
+- The installed PWA is a standalone web app. It is not listed in the Apple App Store or Google Play. iOS installs through Add to Home Screen in Safari.
+- Offline mode serves the cached app shell and vendor library. Google fonts fall back to system fonts when the network is unavailable. Bumping the cache name in `sw.js` ships updates; the app shows an **Update available** toast so you can reload.
 - Prerelease: expect rough edges; please file issues when something feels off.

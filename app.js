@@ -35,8 +35,14 @@
     holidays: [],
     showCritical: false,
     view: "timeline",
+    mobilePane: "timeline",
     baselineSetAt: null,
   };
+
+  var MOBILE_BP = 900;
+  var pendingInstall = null;
+  var swRefreshing = false;
+  var pressTimer = null;
 
   var historyStack = [];
   var redoStack = [];
@@ -78,6 +84,7 @@
       holidays: clone(state.holidays || []),
       showCritical: !!state.showCritical,
       view: state.view,
+      mobilePane: state.mobilePane,
       baselineSetAt: state.baselineSetAt,
     };
   }
@@ -98,6 +105,7 @@
     state.holidays = clone(snap.holidays || []);
     state.showCritical = !!snap.showCritical;
     state.view = snap.view || "timeline";
+    state.mobilePane = snap.mobilePane || (state.view === "resources" ? "resources" : "timeline");
     state.baselineSetAt = snap.baselineSetAt || null;
     S.reschedule(state.tasks, scheduleOptions());
     renderAll();
@@ -121,18 +129,43 @@
   }
 
   function updateUndoButtons() {
-    $("btn-undo").disabled = !historyStack.length;
-    $("btn-redo").disabled = !redoStack.length;
+    var noUndo = !historyStack.length;
+    var noRedo = !redoStack.length;
+    ["btn-undo", "btn-redo"].forEach(function (id, i) {
+      var el = $(id);
+      if (el) el.disabled = i === 0 ? noUndo : noRedo;
+    });
+    document.querySelectorAll("[data-action=undo]").forEach(function (el) { el.disabled = noUndo; });
+    document.querySelectorAll("[data-action=redo]").forEach(function (el) { el.disabled = noRedo; });
   }
 
-  function toast(msg) {
+  function toast(msg, opts) {
+    opts = opts || {};
     var el = $("toast");
+    // Keep a sticky "update available" toast until the user acts on it.
+    if (el.classList.contains("toast-action") && el.classList.contains("show") && !(opts.actionLabel && opts.onAction)) {
+      return;
+    }
+    el.classList.remove("toast-action");
+    if (opts.actionLabel && opts.onAction) {
+      el.classList.add("toast-action");
+      el.innerHTML = "";
+      el.appendChild(document.createTextNode(msg));
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = opts.actionLabel;
+      btn.addEventListener("click", opts.onAction);
+      el.appendChild(btn);
+      el.classList.add("show");
+      clearTimeout(toastTimer);
+      return;
+    }
     el.textContent = msg;
     el.classList.add("show");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () {
       el.classList.remove("show");
-    }, 2400);
+    }, opts.ms || 2400);
   }
 
   function persistPayload() {
@@ -147,6 +180,7 @@
       holidays: state.holidays,
       showCritical: state.showCritical,
       view: state.view,
+      mobilePane: state.mobilePane,
       baselineSetAt: state.baselineSetAt,
     };
   }
@@ -187,6 +221,11 @@
     state.showCritical = !!(data && data.showCritical);
     if (data && (data.view === "timeline" || data.view === "resources")) state.view = data.view;
     else state.view = "timeline";
+    if (data && (data.mobilePane === "table" || data.mobilePane === "timeline" || data.mobilePane === "resources")) {
+      state.mobilePane = data.mobilePane;
+    } else {
+      state.mobilePane = state.view === "resources" ? "resources" : "timeline";
+    }
     state.baselineSetAt = (data && data.baselineSetAt) || null;
     var next = 1;
     state.tasks = tasks.map(function (raw, i) {
@@ -572,6 +611,7 @@
     state.holidays = [];
     state.showCritical = false;
     state.view = "timeline";
+    state.mobilePane = "timeline";
     state.baselineSetAt = null;
     renderAll();
     persist();
@@ -997,7 +1037,7 @@
                 "</div>") +
             (task.isGroup
               ? ""
-              : '<div class="bar-handle start" data-handle="start"></div><div class="bar-handle end" data-handle="end"></div>') +
+              : '<div class="bar-grip" data-handle="move" title="Drag to move"></div><div class="bar-handle start" data-handle="start"></div><div class="bar-handle end" data-handle="end"></div>') +
             "</div>";
         }
       }
@@ -1196,28 +1236,80 @@
     return d ? d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : iso;
   }
 
+  function isMobileLayout() {
+    return window.innerWidth <= MOBILE_BP;
+  }
+
+  function applyMobilePane() {
+    var ws = $("workspace") || document.querySelector(".workspace");
+    if (!ws) return;
+    var pane = state.mobilePane || "timeline";
+    ws.classList.toggle("is-mobile-table", pane === "table");
+    ws.classList.toggle("is-mobile-timeline", pane === "timeline");
+    ws.classList.toggle("is-mobile-resources", pane === "resources");
+    document.querySelectorAll("[data-pane]").forEach(function (btn) {
+      btn.setAttribute("aria-pressed", btn.getAttribute("data-pane") === pane ? "true" : "false");
+    });
+    if (pane === "resources" && state.view !== "resources") {
+      state.view = "resources";
+    } else if (pane === "timeline" && state.view !== "timeline") {
+      state.view = "timeline";
+    }
+  }
+
+  function setMobilePane(pane) {
+    if (pane !== "table" && pane !== "timeline" && pane !== "resources") return;
+    state.mobilePane = pane;
+    if (pane === "resources") state.view = "resources";
+    if (pane === "timeline") state.view = "timeline";
+    applyMobilePane();
+    renderZoom();
+    renderTimeline();
+    persist();
+  }
+
   function renderZoom() {
-    document.querySelectorAll(".seg [data-zoom]").forEach(function (btn) {
-      btn.setAttribute("aria-pressed", btn.getAttribute("data-zoom") === state.zoom ? "true" : "false");
+    document.querySelectorAll("[data-zoom]").forEach(function (btn) {
+      var on = btn.getAttribute("data-zoom") === state.zoom;
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (btn.getAttribute("role") === "menuitemradio") btn.setAttribute("aria-checked", on ? "true" : "false");
+      btn.classList.toggle("is-active", on);
     });
-    document.querySelectorAll(".seg [data-cal]").forEach(function (btn) {
-      btn.setAttribute("aria-pressed", btn.getAttribute("data-cal") === state.calendarMode ? "true" : "false");
+    document.querySelectorAll("[data-cal]").forEach(function (btn) {
+      var on = btn.getAttribute("data-cal") === state.calendarMode;
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (btn.getAttribute("role") === "menuitemradio") btn.setAttribute("aria-checked", on ? "true" : "false");
+      btn.classList.toggle("is-active", on);
     });
-    document.querySelectorAll(".seg [data-view]").forEach(function (btn) {
-      btn.setAttribute("aria-pressed", btn.getAttribute("data-view") === state.view ? "true" : "false");
+    document.querySelectorAll("[data-view]").forEach(function (btn) {
+      var on = btn.getAttribute("data-view") === state.view;
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (btn.getAttribute("role") === "menuitemradio") btn.setAttribute("aria-checked", on ? "true" : "false");
+      btn.classList.toggle("is-active", on);
     });
-    $("chk-critical").checked = !!state.showCritical;
+    var crit = $("chk-critical");
+    if (crit) {
+      crit.setAttribute("aria-checked", state.showCritical ? "true" : "false");
+      crit.classList.toggle("is-active", !!state.showCritical);
+    }
+    document.querySelectorAll("[data-critical-item]").forEach(function (el) {
+      el.setAttribute("aria-checked", state.showCritical ? "true" : "false");
+      el.classList.toggle("is-active", !!state.showCritical);
+    });
+    applyMobilePane();
   }
 
   function renderAll() {
     $("project-title").value = state.projectName;
     applySplit();
+    applyMobilePane();
     renderZoom();
     renderTable();
     renderTimeline();
     updateStatus();
     updateUndoButtons();
     renderHolidayList();
+    updateInstallButtons();
   }
 
   /* ---- interactions ----------------------------------------------------- */
@@ -1359,8 +1451,33 @@
     }
   }
 
+  function startBarDrag(task, mode, clientX) {
+    pushHistory();
+    drag = {
+      id: task.id,
+      mode: mode,
+      startX: clientX,
+      origStart: task.start,
+      origEnd: task.end,
+      origDuration: task.duration,
+      snapshot: state.tasks.map(function (t) {
+        return { id: t.id, start: t.start, end: t.end, duration: t.duration };
+      }),
+    };
+    window.addEventListener("pointermove", onBarPointerMove);
+    window.addEventListener("pointerup", onBarPointerUp);
+    window.addEventListener("pointercancel", onBarPointerUp);
+  }
+
+  function clearPressTimer() {
+    if (pressTimer) {
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+  }
+
   function onCanvasPointerDown(e) {
-    var handle = e.target.closest(".bar-handle");
+    var handle = e.target.closest(".bar-handle, .bar-grip");
     var bar = e.target.closest(".bar, .milestone-diamond");
     if (!bar) {
       var row = e.target.closest(".tl-row");
@@ -1374,25 +1491,49 @@
     var task = getTask(bar.dataset.id);
     if (!task) return;
     state.selectedId = task.id;
-    if (task.isGroup && handle) return;
-    if (task.milestone && handle) return;
-    e.preventDefault();
-    var mode = handle ? (handle.getAttribute("data-handle") === "start" ? "resize-start" : "resize-end") : "move";
-    pushHistory();
-    drag = {
-      id: task.id,
-      mode: mode,
-      startX: e.clientX,
-      origStart: task.start,
-      origEnd: task.end,
-      origDuration: task.duration,
-      snapshot: state.tasks.map(function (t) {
-        return { id: t.id, start: t.start, end: t.end, duration: t.duration };
-      }),
-    };
-    window.addEventListener("pointermove", onBarPointerMove);
-    window.addEventListener("pointerup", onBarPointerUp);
-    window.addEventListener("pointercancel", onBarPointerUp);
+    if (task.isGroup && handle && handle.classList.contains("bar-handle")) return;
+    if (task.milestone && handle && handle.classList.contains("bar-handle")) return;
+
+    var mode = "move";
+    if (handle) {
+      var kind = handle.getAttribute("data-handle");
+      if (kind === "start") mode = "resize-start";
+      else if (kind === "end") mode = "resize-end";
+      else mode = "move";
+    }
+
+    var isTouch = e.pointerType === "touch";
+    var needsPress = isTouch && !handle && !task.isGroup;
+    if (!needsPress) {
+      e.preventDefault();
+      startBarDrag(task, mode, e.clientX);
+      return;
+    }
+
+    // Long-press to drag, so a swipe on a bar can still scroll the timeline.
+    var startX = e.clientX;
+    var startY = e.clientY;
+    var pointerId = e.pointerId;
+    clearPressTimer();
+    function onMove(ev) {
+      if (ev.pointerId !== pointerId) return;
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 8) {
+        cancelPress();
+      }
+    }
+    function cancelPress() {
+      clearPressTimer();
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", cancelPress);
+      window.removeEventListener("pointercancel", cancelPress);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", cancelPress);
+    window.addEventListener("pointercancel", cancelPress);
+    pressTimer = setTimeout(function () {
+      cancelPress();
+      startBarDrag(task, "move", startX);
+    }, 380);
   }
 
   function onBarPointerMove(e) {
@@ -1479,7 +1620,7 @@
   }
 
   function applySplit() {
-    if (window.innerWidth <= 860) {
+    if (isMobileLayout()) {
       $("task-pane").style.width = "";
       return;
     }
@@ -1973,6 +2114,8 @@
 
   function applyTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", theme === "dark" ? "#10141b" : "#0f766e");
     try {
       localStorage.setItem(THEME_KEY, theme);
     } catch (e) {}
@@ -1987,10 +2130,264 @@
     else applyTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   }
 
+  /* ---- menus, overflow sheet, PWA -------------------------------------- */
+
+  function closeMenus() {
+    document.querySelectorAll(".menu").forEach(function (menu) {
+      var pop = menu.querySelector(".menu-pop");
+      var trigger = menu.querySelector(".menu-trigger");
+      if (pop) pop.hidden = true;
+      if (trigger) trigger.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function openMenu(name) {
+    closeMenus();
+    var menu = document.querySelector('.menu[data-menu="' + name + '"]');
+    if (!menu) return null;
+    var pop = menu.querySelector(".menu-pop");
+    var trigger = menu.querySelector(".menu-trigger");
+    if (!pop) return null;
+    pop.hidden = false;
+    if (trigger) trigger.setAttribute("aria-expanded", "true");
+    var first = pop.querySelector('button:not([hidden]):not([disabled])');
+    if (first) first.focus();
+    return pop;
+  }
+
+  function isMenuOpen() {
+    return !!document.querySelector(".menu-pop:not([hidden])");
+  }
+
+  function closeSheet() {
+    var sheet = $("overflow-sheet");
+    if (!sheet) return;
+    sheet.hidden = true;
+    var btn = $("btn-overflow");
+    if (btn) {
+      btn.setAttribute("aria-expanded", "false");
+      btn.focus();
+    }
+  }
+
+  function openSheet() {
+    closeMenus();
+    var sheet = $("overflow-sheet");
+    if (!sheet) return;
+    sheet.hidden = false;
+    var btn = $("btn-overflow");
+    if (btn) btn.setAttribute("aria-expanded", "true");
+    var panel = sheet.querySelector(".sheet-panel");
+    if (panel) panel.focus();
+  }
+
+  function isSheetOpen() {
+    var sheet = $("overflow-sheet");
+    return !!(sheet && !sheet.hidden);
+  }
+
+  function indentSelected() {
+    if (!state.selectedId) {
+      toast("Select a task first");
+      return;
+    }
+    var idx = indexById(state.selectedId);
+    if (idx >= 0) indentBlock(idx);
+  }
+
+  function outdentSelected() {
+    if (!state.selectedId) {
+      toast("Select a task first");
+      return;
+    }
+    var idx = indexById(state.selectedId);
+    if (idx >= 0) outdentBlock(idx);
+  }
+
+  function toggleCritical(force) {
+    state.showCritical = force == null ? !state.showCritical : !!force;
+    renderZoom();
+    renderTimeline();
+    updateStatus();
+    persist();
+  }
+
+  function openHolidays() {
+    renderHolidayList();
+    $("holiday-dialog").showModal();
+  }
+
+  function isStandalone() {
+    return (
+      window.matchMedia("(display-mode: standalone)").matches ||
+      window.navigator.standalone === true
+    );
+  }
+
+  function isIos() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+
+  function updateInstallButtons() {
+    var show = !isStandalone() && (!!pendingInstall || isIos());
+    var btn = $("btn-install");
+    if (btn) btn.hidden = !show;
+    document.querySelectorAll("[data-install-item]").forEach(function (el) {
+      el.hidden = !show;
+    });
+  }
+
+  function installApp() {
+    if (pendingInstall) {
+      var ev = pendingInstall;
+      pendingInstall = null;
+      ev.prompt();
+      ev.userChoice.then(function () {
+        updateInstallButtons();
+      });
+      return;
+    }
+    if (isIos() && !isStandalone()) {
+      $("install-dialog").showModal();
+      return;
+    }
+    toast("This browser does not offer an install prompt. Use your browser's Install or Add to Home Screen option.");
+  }
+
+  function runAction(name) {
+    if (name === "new") newProject();
+    else if (name === "sample") loadSample();
+    else if (name === "import") $("import-file").click();
+    else if (name === "export-json") exportJSON();
+    else if (name === "export-xlsx") exportExcel();
+    else if (name === "export-png") exportPNG();
+    else if (name === "install") installApp();
+    else if (name === "undo") undo();
+    else if (name === "redo") redo();
+    else if (name === "add") addTask();
+    else if (name === "indent") indentSelected();
+    else if (name === "outdent") outdentSelected();
+    else if (name === "theme") applyTheme(currentTheme() === "dark" ? "light" : "dark");
+    else if (name === "critical") toggleCritical();
+    else if (name === "holidays") openHolidays();
+    else if (name === "baseline") setBaseline();
+    else if (name === "clear-baseline") clearBaseline();
+  }
+
+  function initMenus() {
+    document.querySelectorAll(".menu-trigger").forEach(function (trigger) {
+      trigger.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var menu = trigger.closest(".menu");
+        var name = menu && menu.getAttribute("data-menu");
+        var pop = menu && menu.querySelector(".menu-pop");
+        if (pop && !pop.hidden) closeMenus();
+        else if (name) openMenu(name);
+      });
+      trigger.addEventListener("keydown", function (e) {
+        if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          var menu = trigger.closest(".menu");
+          var name = menu && menu.getAttribute("data-menu");
+          if (name) openMenu(name);
+        }
+      });
+    });
+
+    document.querySelectorAll(".menu-pop").forEach(function (pop) {
+      pop.addEventListener("keydown", function (e) {
+        var items = Array.prototype.slice.call(pop.querySelectorAll("button:not([hidden]):not([disabled])"));
+        var idx = items.indexOf(document.activeElement);
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeMenus();
+          var trigger = pop.parentElement.querySelector(".menu-trigger");
+          if (trigger) trigger.focus();
+        } else if (e.key === "ArrowDown") {
+          e.preventDefault();
+          items[(idx + 1) % items.length].focus();
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          items[(idx - 1 + items.length) % items.length].focus();
+        } else if (e.key === "Home") {
+          e.preventDefault();
+          if (items[0]) items[0].focus();
+        } else if (e.key === "End") {
+          e.preventDefault();
+          if (items.length) items[items.length - 1].focus();
+        } else if (e.key === "Tab") {
+          closeMenus();
+        }
+      });
+      pop.addEventListener("click", function () {
+        closeMenus();
+      });
+    });
+
+    document.addEventListener("pointerdown", function (e) {
+      if (!e.target.closest(".menu")) closeMenus();
+      if (isSheetOpen() && e.target.closest("[data-close-sheet]")) closeSheet();
+    });
+  }
+
+  function initSheet() {
+    $("btn-overflow").addEventListener("click", function () {
+      if (isSheetOpen()) closeSheet();
+      else openSheet();
+    });
+    $("btn-sheet-close").addEventListener("click", closeSheet);
+    $("overflow-sheet").addEventListener("click", function (e) {
+      var item = e.target.closest(".sheet-item, [data-action], [data-zoom], [data-cal]");
+      if (!item || item.closest(".menu-pop")) return;
+      // Let bind() handlers run; close after a tick so the click is processed.
+      setTimeout(closeSheet, 0);
+    });
+  }
+
+  function registerServiceWorker() {
+    if (!("serviceWorker" in navigator)) return;
+    var swUrl = new URL("sw.js", window.location.href);
+    navigator.serviceWorker
+      .register(swUrl.href)
+      .then(function (reg) {
+        function onInstalled() {
+          if (navigator.serviceWorker.controller) promptSwUpdate(reg);
+          else if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+        }
+        if (reg.waiting) onInstalled();
+        reg.addEventListener("updatefound", function () {
+          var worker = reg.installing;
+          if (!worker) return;
+          worker.addEventListener("statechange", function () {
+            if (worker.state === "installed") onInstalled();
+          });
+        });
+      })
+      .catch(function () {});
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (!swRefreshing) return;
+      window.location.reload();
+    });
+  }
+
+  function promptSwUpdate(reg) {
+    if (!reg.waiting) return;
+    toast("Update available.", {
+      actionLabel: "Reload",
+      onAction: function () {
+        swRefreshing = true;
+        if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+      },
+    });
+  }
+
   /* ---- boot ------------------------------------------------------------- */
 
   function bind() {
     $("btn-add").addEventListener("click", function () { addTask(); });
+    $("btn-add-header").addEventListener("click", function () { addTask(); });
     $("btn-new").addEventListener("click", newProject);
     $("btn-sample").addEventListener("click", loadSample);
     $("btn-export-json").addEventListener("click", exportJSON);
@@ -2009,16 +2406,12 @@
     });
     $("btn-baseline").addEventListener("click", setBaseline);
     $("btn-clear-baseline").addEventListener("click", clearBaseline);
-    $("chk-critical").addEventListener("change", function (e) {
-      state.showCritical = !!e.target.checked;
-      renderTimeline();
-      updateStatus();
-      persist();
+    $("chk-critical").addEventListener("click", function (e) {
+      e.preventDefault();
+      toggleCritical();
     });
-    $("btn-holidays").addEventListener("click", function () {
-      renderHolidayList();
-      $("holiday-dialog").showModal();
-    });
+    $("btn-holidays").addEventListener("click", openHolidays);
+    $("btn-install").addEventListener("click", installApp);
     $("holiday-add").addEventListener("click", function () {
       addHoliday($("holiday-date").value);
       $("holiday-date").value = "";
@@ -2036,31 +2429,50 @@
       typingCheckpoint = false;
     });
 
-    document.querySelectorAll(".seg [data-zoom]").forEach(function (btn) {
+    document.addEventListener("click", function (e) {
+      var action = e.target.closest("[data-action]");
+      if (!action) return;
+      if (action.id && (action.id === "btn-new" || action.id === "btn-sample" || action.id === "btn-import" || action.id.indexOf("btn-export") === 0 || action.id === "btn-install" || action.id === "btn-holidays" || action.id === "btn-baseline" || action.id === "btn-clear-baseline" || action.id === "chk-critical" || action.id === "btn-theme")) {
+        return;
+      }
+      runAction(action.getAttribute("data-action"));
+    });
+
+    document.querySelectorAll("[data-zoom]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         state.zoom = btn.getAttribute("data-zoom");
+        closeMenus();
         renderZoom();
         renderTimeline();
         persist();
       });
     });
-    document.querySelectorAll(".seg [data-cal]").forEach(function (btn) {
+    document.querySelectorAll("[data-cal]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var mode = btn.getAttribute("data-cal");
         if (mode === state.calendarMode) return;
         pushHistory();
         state.calendarMode = mode;
+        closeMenus();
         runSchedule();
         renderAll();
         persist();
       });
     });
-    document.querySelectorAll(".seg [data-view]").forEach(function (btn) {
+    document.querySelectorAll("[data-view]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        state.view = btn.getAttribute("data-view");
+        var view = btn.getAttribute("data-view");
+        state.view = view === "resources" ? "resources" : "timeline";
+        state.mobilePane = state.view;
+        closeMenus();
         renderZoom();
         renderTimeline();
         persist();
+      });
+    });
+    document.querySelectorAll("[data-pane]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        setMobilePane(btn.getAttribute("data-pane"));
       });
     });
 
@@ -2088,6 +2500,18 @@
 
     document.addEventListener("keydown", function (e) {
       var meta = e.metaKey || e.ctrlKey;
+      if (e.key === "Escape") {
+        if (isSheetOpen()) {
+          e.preventDefault();
+          closeSheet();
+          return;
+        }
+        if (isMenuOpen()) {
+          e.preventDefault();
+          closeMenus();
+          return;
+        }
+      }
       if (meta && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) redo();
@@ -2100,19 +2524,36 @@
 
     window.addEventListener("resize", function () {
       applySplit();
+      applyMobilePane();
       renderTimeline();
     });
 
+    window.addEventListener("beforeinstallprompt", function (e) {
+      e.preventDefault();
+      pendingInstall = e;
+      updateInstallButtons();
+    });
+    window.addEventListener("appinstalled", function () {
+      pendingInstall = null;
+      updateInstallButtons();
+      toast("Gantt was installed");
+    });
+
+    initMenus();
+    initSheet();
     initSplitter();
   }
 
   function boot() {
     initTheme();
     bind();
+    registerServiceWorker();
+    updateInstallButtons();
     if (!loadPersisted()) {
       renderAll();
     } else {
       applySplit();
+      applyMobilePane();
     }
   }
 
@@ -2137,6 +2578,7 @@
       state.holidays = [];
       state.showCritical = false;
       state.view = "timeline";
+      state.mobilePane = "timeline";
       state.baselineSetAt = null;
       renderAll();
       persist();
@@ -2164,9 +2606,19 @@
     },
     setView: function (view) {
       state.view = view === "resources" ? "resources" : "timeline";
+      state.mobilePane = state.view;
       renderAll();
       persist();
     },
+    setMobilePane: setMobilePane,
+    openMenu: openMenu,
+    closeMenus: closeMenus,
+    openSheet: openSheet,
+    closeSheet: closeSheet,
+    isMenuOpen: isMenuOpen,
+    isSheetOpen: isSheetOpen,
+    isMobileLayout: isMobileLayout,
+
     exportExcelBuffer: exportExcelBuffer,
     importProject: function (data) { applyProject(data); },
     sampleProject: sampleProject,
